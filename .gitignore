@@ -1,0 +1,16 @@
+# Rust
+/target/
+
+# Local runtime state
+/data/
+/logs/
+/dist/
+
+# Real config and secrets - examples stay committed
+/config.toml
+/config.local.toml
+.env
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
