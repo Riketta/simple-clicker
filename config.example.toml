@@ -1,0 +1,119 @@
+# Copy to config.toml and adjust. config.toml is gitignored; THIS file is
+# the checked-in, documented template and must stay in sync with the
+# config structs in the same change that alters the schema.
+# Secrets never live here - the clicker has none.
+
+# ---------------------------------------------------------------------------
+# Target: which application the clicker drives.
+# ---------------------------------------------------------------------------
+[target]
+# Process names to look for (case-insensitive, .exe optional). Used to find
+# the game window and, on Windows, to check focus.
+process_names = ["Wow", "Wow-64", "WowClassic"]
+# Keep looking every 2s instead of failing when no process matches.
+wait_for_window = true
+# Stop the clicker when the target window disappears.
+exit_when_lost = true
+# Only spam while the target window is focused. Requires the Win32 focus
+# monitor (Windows); with the versa-kbm sink on another platform this must
+# be false, because there is no focus monitor.
+require_focus = true
+
+# ---------------------------------------------------------------------------
+# Clicker: engine knobs.
+# ---------------------------------------------------------------------------
+[clicker]
+# Extra milliseconds added to every repetition gap (the original tool's
+# --addeddelay= argument).
+added_delay_ms = 0
+# Hotkeys are recognized even when the target window is not focused
+# (GetAsyncKeyState / rdev both read global state).
+global_hotkeys = true
+# Toggles clicking on and off.
+toggle_key = "Numpad4"
+# Profile and action selected at startup (defaults: the first of each).
+default_profile = "human"
+default_action = "spell"
+
+# ---------------------------------------------------------------------------
+# Profiles: pacing between repetitions. Select one with its hotkey.
+# ---------------------------------------------------------------------------
+[[profile]]
+name = "human"
+select = "Numpad6"
+# Gap between repetitions, sampled uniformly in min..=max plus the
+# clicker.added_delay_ms.
+interval_ms = { min = 15, max = 60 }
+
+[[profile]]
+name = "super"
+select = "Numpad5"
+# Zero interval: spam as fast as the sink allows (the original "super mode").
+interval_ms = { min = 0, max = 0 }
+
+# ---------------------------------------------------------------------------
+# Actions: what gets spammed while selected. One repetition walks the steps
+# in order. A step is either `key`, `button`, or neither (= pause).
+# hold_ms bounds the press hold (or pause duration); keys default to 0.
+# ---------------------------------------------------------------------------
+[[action]]
+name = "spell"
+select = "Numpad2"
+steps = [{ key = "Q", hold_ms = { min = 0, max = 0 } }]
+
+[[action]]
+name = "interact"
+select = "Numpad3"
+
+[[action.steps]]
+key = "Numpad0"
+
+[[action]]
+name = "tag-mob"
+select = "Numpad1"
+# A longer example: pause, then click, then tap a key.
+steps = [
+    { hold_ms = { min = 200, max = 400 } },
+    { button = "left", hold_ms = { min = 20, max = 60 } },
+    { key = "F1" },
+]
+
+# ---------------------------------------------------------------------------
+# Sink: where actuations are delivered.
+# backend: auto | win32 | versa-kbm | log
+#   auto       - win32 when the target window is found (Windows),
+#                otherwise versa-kbm when the device is present
+#   win32      - WM_KEYDOWN/UP messages into the target window (Windows
+#                only); mouse clicks are global SendInput
+#   versa-kbm  - the versa-kbm RP2040 HID device (any OS with hidapi)
+#   log        - dry-run: log actuations, touch nothing
+# ---------------------------------------------------------------------------
+[sink]
+backend = "auto"
+
+[sink.versa-kbm]
+# USB identity to look for (must match the device firmware's constants).
+vid = 0x258a
+pid = 0x0100
+# Per-command ack timeout, in milliseconds.
+timeout_ms = 250
+# Release everything on the device when the clicker stops.
+release_on_stop = true
+
+# ---------------------------------------------------------------------------
+# Hotkeys: where hotkey presses come from.
+# backend: auto | win32 | rdev
+#   auto - win32 on Windows, rdev elsewhere
+#   win32 - GetAsyncKeyState polling (Windows only)
+#   rdev  - global event listener (Linux/X11, macOS*, Windows)
+#           * macOS needs Accessibility permissions; Wayland is unsupported
+# ---------------------------------------------------------------------------
+[hotkeys]
+backend = "auto"
+
+# ---------------------------------------------------------------------------
+# Logging.
+# ---------------------------------------------------------------------------
+[logging]
+# Default filter when the RUST_LOG environment variable is unset.
+level = "info"

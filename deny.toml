@@ -1,0 +1,48 @@
+# cargo-deny configuration: licenses, advisories, bans, sources.
+
+[graph]
+all-features = true
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.93
+
+# The versa-kbm crates arrive as local path dependencies without SPDX
+# metadata in their manifests; they are first-party code (same author as
+# this project), distributed under MIT.
+[[licenses.clarify]]
+name = "vkbm-cli"
+expression = "MIT"
+license-files = []
+
+[[licenses.clarify]]
+name = "vkbm-proto"
+expression = "MIT"
+license-files = []
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[bans]
+multiple-versions = "warn"
+# "deny" would flag the versa-kbm path dependencies, which carry no
+# version requirement by construction; keep them visible but non-fatal.
+wildcards = "warn"
+highlight = "all"
+
+[sources]
+unknown-registry = "warn"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

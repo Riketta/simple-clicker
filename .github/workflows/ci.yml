@@ -1,0 +1,210 @@
+# CI gate for simple-clicker. The local gate IS this gate: same commands,
+# same order (see AGENTS.md).
+#   linux:   core gate - fmt / clippy (3 feature combos) / test / build / deny
+#   windows: native tool gate - clippy (default + all-features) / test / build
+#   release + publish: packaged archives on v* tags
+# Formatting runs under nightly rustfmt (rustfmt.toml uses unstable
+# options). Everything else uses the toolchain pinned by
+# rust-toolchain.toml.
+#
+# The versa-kbm adapter is a relative path dependency
+# (`../WoW Goop/versa-kbm`); jobs that build --all-features clone it to
+# that exact location first.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  linux:
+    name: Linux · fmt / clippy / test / build / deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # Nightly FIRST for rustfmt only (unstable rustfmt.toml options are
+      # silently ignored by stable, which would weaken the format gate),
+      # then stable so plain `cargo` resolves stable regardless of order.
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      # System libraries for the adapters: libudev (hidapi) and X11/XInput/
+      # XTst (rdev's global listener).
+      - name: Install adapter system libraries
+        run: >
+          sudo apt-get update &&
+          sudo apt-get install -y libudev-dev libx11-dev libxi-dev libxtst-dev
+
+      # The versa-kbm adapter resolves through a relative path dependency;
+      # place a checkout exactly where the manifest expects it.
+      - name: Check out versa-kbm
+        shell: bash
+        run: git clone --depth 1 https://github.com/Riketta/versa-kbm "../WoW Goop/versa-kbm"
+
+      - name: Format (nightly rustfmt options)
+        run: cargo +nightly fmt --all -- --check
+
+      - name: Clippy (default features)
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Clippy (no default features)
+        run: cargo clippy --all-targets --no-default-features --locked -- -D warnings
+
+      - name: Clippy (all features)
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+      - name: Tests
+        run: cargo test --locked
+
+      - name: Tests (no default features)
+        run: cargo test --no-default-features --locked
+
+      - name: Build
+        run: cargo build --locked
+
+      - name: Deny (licenses / advisories / bans / sources)
+        uses: EmbarkStudios/cargo-deny-action@v2
+
+  windows:
+    name: Windows · clippy / test / build
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check out versa-kbm
+        shell: bash
+        run: git clone --depth 1 https://github.com/Riketta/versa-kbm "../WoW Goop/versa-kbm"
+
+      - name: Clippy (default features)
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Clippy (no default features)
+        run: cargo clippy --all-targets --no-default-features --locked -- -D warnings
+
+      - name: Clippy (all features)
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+      - name: Tests
+        run: cargo test --locked
+
+      - name: Build
+        run: cargo build --locked
+
+  release:
+    name: Release · ${{ matrix.target }}
+    # Builds on tags and manual dispatch; PUBLISH stays tag-only below.
+    if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+    needs: [linux]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # Adapter system libraries (Linux): hidapi + rdev.
+      - name: Install adapter system libraries
+        if: runner.os == 'Linux'
+        run: >
+          sudo apt-get update &&
+          sudo apt-get install -y libudev-dev libx11-dev libxi-dev libxtst-dev
+
+      - name: Check out versa-kbm
+        shell: bash
+        run: git clone --depth 1 https://github.com/Riketta/versa-kbm "../WoW Goop/versa-kbm"
+
+      - name: Build release binary (all adapters)
+        run: cargo build --release --locked --all-features --target ${{ matrix.target }}
+
+      - name: Package (linux)
+        if: runner.os == 'Linux'
+        run: |
+          name="simple-clicker-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir -p "dist/${name}"
+          cp "target/${{ matrix.target }}/release/simple-clicker" "dist/${name}/"
+          cp config.example.toml "dist/${name}/"
+          cp README.md "dist/${name}/"
+          cp LICENSE "dist/${name}/"
+          tar -czf "dist/${name}.tar.gz" -C dist "${name}"
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = "simple-clicker-$env:GITHUB_REF_NAME-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force "dist/$name" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/simple-clicker.exe" "dist/$name/"
+          Copy-Item config.example.toml "dist/$name/"
+          Copy-Item README.md "dist/$name/"
+          Copy-Item LICENSE "dist/$name/"
+          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    if: github.ref_type == 'tag'
+    needs: [release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        # Glob-free on purpose: works no matter which targets the
+        # release matrix kept.
+        run: |
+          cd dist
+          sha256sum ./* > SHA256SUMS
+
+      - name: Attach archives to the tag release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes
