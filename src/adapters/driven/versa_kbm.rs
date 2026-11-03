@@ -64,7 +64,11 @@ pub enum VersaError {
 pub struct VersaKbmSink {
     client: Client,
     timeout: Duration,
+    /// Whether the sink should release the device on shutdown.
     release_on_stop: bool,
+    /// Set once a `ReleaseAll` has been accepted, so the [`Drop`] handler
+    /// does not send a redundant one on the normal exit path.
+    released: bool,
     summary: String,
 }
 
@@ -102,26 +106,9 @@ impl VersaKbmSink {
             client,
             timeout: Duration::from_millis(settings.timeout_ms),
             release_on_stop: settings.release_on_stop,
+            released: false,
             summary,
         })
-    }
-
-    /// Whether the sink should release the device on shutdown.
-    #[must_use]
-    pub fn release_on_stop(&self) -> bool {
-        self.release_on_stop
-    }
-
-    /// Best-effort release of everything the device holds; called by the
-    /// driver on stop when [`Self::release_on_stop`] is set.
-    pub fn shutdown(&mut self) {
-        if !self.release_on_stop {
-            return;
-        }
-        match self.client.request(&Command::ReleaseAll, self.timeout) {
-            Ok(_) => info!("device inputs released"),
-            Err(err) => warn!("release-on-stop failed: {err}"),
-        }
     }
 
     fn request(&mut self, command: Command) -> Result<(), SinkError> {
@@ -144,15 +131,22 @@ impl VersaKbmSink {
 impl InputSink for VersaKbmSink {
     fn actuate(&mut self, actuation: &Actuation) -> Result<(), SinkError> {
         match *actuation {
-            Actuation::KeyDown(key) => self.request(Command::KeyDown { usage: hid_usage(key) }),
+            Actuation::KeyDown(key) => {
+                self.released = false;
+                self.request(Command::KeyDown { usage: hid_usage(key) })
+            }
             Actuation::KeyUp(key) => self.request(Command::KeyUp { usage: hid_usage(key) }),
             Actuation::MouseDown(button) => {
+                self.released = false;
                 self.request(Command::MouseDown { button: map_button(button) })
             }
             Actuation::MouseUp(button) => {
                 self.request(Command::MouseUp { button: map_button(button) })
             }
-            Actuation::ReleaseAll => self.request(Command::ReleaseAll),
+            Actuation::ReleaseAll => {
+                self.released = true;
+                self.request(Command::ReleaseAll)
+            }
         }
     }
 
@@ -163,6 +157,21 @@ impl InputSink for VersaKbmSink {
 
     fn describe(&self) -> String {
         self.summary.clone()
+    }
+}
+
+impl Drop for VersaKbmSink {
+    /// Best-effort release (per [`VersaKbmSettings::release_on_stop`]) on
+    /// paths that skip the driver's normal shutdown: panics, early
+    /// returns, or an unusual signal. Harmless when nothing is held.
+    fn drop(&mut self) {
+        if !self.release_on_stop || self.released {
+            return;
+        }
+        match self.client.request(&Command::ReleaseAll, self.timeout) {
+            Ok(_) => info!("device inputs released"),
+            Err(err) => warn!("release on drop failed: {err}"),
+        }
     }
 }
 

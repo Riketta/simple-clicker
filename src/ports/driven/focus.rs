@@ -5,7 +5,9 @@ pub trait FocusMonitor {
     /// `Some(true)` when the target is focused, `Some(false)` when another
     /// window is, `None` when the state cannot be determined (the engine
     /// then degrades safely: presses are withheld, releases still fire).
-    fn is_focused(&self) -> Option<bool>;
+    /// Takes `&mut self` so monitors can re-acquire a restarted target
+    /// window in place.
+    fn is_focused(&mut self) -> Option<bool>;
 
     /// A human-readable description of the backend for the startup banner.
     #[must_use]

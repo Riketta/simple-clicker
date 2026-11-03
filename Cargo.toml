@@ -44,6 +44,7 @@ vkbm-cli = { git = "https://github.com/Riketta/versa-kbm", branch = "main", opti
 # onto HID usages and opens the HID manager itself.
 hidapi = { version = "2", optional = true }
 vkbm-proto = { git = "https://github.com/Riketta/versa-kbm", branch = "main", optional = true }
+ctrlc = "3.5.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", optional = true, features = [

@@ -36,8 +36,12 @@ adapter selection) lives in `config.toml`.
 | Focus monitor | `win32` (Windows) | Windows | Compares the foreground window with the target. |
 
 `backend = "auto"` picks the best compiled-in adapter: `win32` on Windows
-when the target window is found, otherwise `versa-kbm` when the device is
-present.
+once the target window is found; while no window exists yet, `versa-kbm`
+when the device is present (unless `require_focus` or `global_hotkeys =
+false` still needs the window for the focus monitor). When the target
+window disappears, `exit_when_lost = true` (default) stops the clicker;
+with `false`, actuation pauses, the win32 adapters re-scan for the window
+every 2s, and clicking resumes when it returns.
 
 ### Cross-platform honesty
 
@@ -94,8 +98,10 @@ Bind it to a key, select the `spell` action, and hold the line.
 - The device must be **armed** (`vkbm arm`) with the hardware BOOTSEL
   switch on; the sink reports both states at startup and translates
   `ERR DISABLED`/`ERR DISARMED` refusals into actionable log lines.
-- `sink.versa-kbm.release_on_stop = true` (default) releases every held key
-  and button on the device when the clicker stops.
+- `sink.versa-kbm.release_on_stop = true` (default) releases every held
+  key and button on the device when the clicker stops — including on
+  Ctrl+C, and a `Drop` handler on the sink releases as a last resort
+  (panics, unusual signals).
 - Toggle-off always releases immediately, so no inputs stay latched.
 
 ## Building, testing, the gate
@@ -111,10 +117,17 @@ Linux build dependencies for the adapters: `libudev-dev` (hidapi),
 
 - Mouse clicks through the `win32` sink move the real cursor (global
   input), matching the original tool's `mouse_event` behavior.
+- The `win32` sink sends keyboard messages synchronously
+  (`SendMessageW`): a hung target window can stall the clicker loop. The
+  versa-kbm sink has no such path.
+- With `clicker.global_hotkeys = false`, the toggle key is only honored
+  while the target window is confirmed focused — refocus the target to
+  toggle off.
 - The `versa-kbm` control channel has no authentication — see the
   [versa-kbm security notes](https://github.com/Riketta/versa-kbm#security--limitations).
-- Ctrl+C kills without a final release; the engine's taps are
-  millisecond-short, and `vkbm release` / the BOOTSEL switch clean up.
+- A hard kill (taskkill, SIGKILL, power loss) skips the final release;
+  the engine's taps are millisecond-short, and `vkbm release` / the
+  BOOTSEL switch clean up.
 - `rdev` cannot observe keys on Wayland sessions.
 
 ## Roadmap

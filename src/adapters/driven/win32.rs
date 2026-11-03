@@ -13,9 +13,16 @@ use std::{
         size_of,
         take,
     },
+    time::{
+        Duration,
+        Instant,
+    },
 };
 
-use tracing::warn;
+use tracing::{
+    info,
+    warn,
+};
 use windows_sys::Win32::{
     Foundation::{
         CloseHandle,
@@ -179,11 +186,13 @@ pub fn vk_code(key: Key) -> u16 {
 }
 
 /// The target application window: found by process name, addressed by
-/// window handle.
+/// window handle. Carries the full configured process list so the sink
+/// and the focus monitor can re-acquire a restarted target on their own.
 #[derive(Clone, Debug)]
 pub struct TargetWindow {
     hwnd: HWND,
     process_name: String,
+    process_names: Vec<String>,
 }
 
 impl TargetWindow {
@@ -196,7 +205,11 @@ impl TargetWindow {
         for name in process_names {
             let Some(pid) = find_process_pid(name) else { continue };
             if let Some(hwnd) = find_main_window(pid) {
-                return Some(Self { hwnd, process_name: name.clone() });
+                return Some(Self {
+                    hwnd,
+                    process_name: name.clone(),
+                    process_names: process_names.to_vec(),
+                });
             }
         }
         None
@@ -216,17 +229,21 @@ impl TargetWindow {
         // only reads it.
         unsafe { IsWindow(self.hwnd) != 0 }
     }
+}
 
-    /// Finds the window again (used to re-acquire after the old one died).
-    #[must_use]
-    pub fn refresh(&mut self, process_names: &[String]) -> bool {
-        if let Some(found) = Self::find(process_names) {
-            self.hwnd = found.hwnd;
-            self.process_name = found.process_name;
-            return true;
-        }
-        false
+/// How often a lost target window is re-scanned for.
+const TARGET_RESCAN: Duration = Duration::from_secs(2);
+
+/// At most one target re-scan per [`TARGET_RESCAN`]: `last` rate-limits
+/// consecutive calls, `names` is the configured process list. Returns the
+/// newly found window, if any.
+fn throttled_rescan(last: &mut Option<Instant>, names: &[String]) -> Option<TargetWindow> {
+    let now = Instant::now();
+    if last.is_some_and(|at| now.duration_since(at) < TARGET_RESCAN) {
+        return None;
     }
+    *last = Some(now);
+    TargetWindow::find(names)
 }
 
 /// One process-list entry scan context.
@@ -332,39 +349,41 @@ fn wide_cstr(buf: &[u16; 260]) -> String {
 }
 
 /// The Win32 input sink: keyboard into the target window, mouse globally.
+/// When the target process exits, actuation pauses and the sink re-scans
+/// (rate-limited) for a restarted process, reporting
+/// [`SinkError::TargetGone`] until then.
 #[derive(Debug)]
 pub struct Win32Sink {
     target: TargetWindow,
     held_keys: HashSet<Key>,
     held_buttons: HashSet<MouseButton>,
+    last_scan: Option<Instant>,
 }
 
 impl Win32Sink {
     /// Builds a sink bound to `target`.
     #[must_use]
     pub fn new(target: TargetWindow) -> Self {
-        Self { target, held_keys: HashSet::new(), held_buttons: HashSet::new() }
+        Self { target, held_keys: HashSet::new(), held_buttons: HashSet::new(), last_scan: None }
     }
 
-    /// The bound target window (the driver watches it for liveness).
-    #[must_use]
-    pub fn target(&self) -> &TargetWindow {
-        &self.target
-    }
-
-    /// Re-arms the sink onto a freshly found window (after the target
-    /// process restarted).
-    pub fn rebind(&mut self, target: TargetWindow) {
-        self.target = target;
-    }
-
-    fn send_key(&self, key: Key, message: u32) -> Result<(), SinkError> {
-        if !self.target.is_alive() {
-            return Err(SinkError::Transport(format!(
-                "target window '{}' is gone",
-                self.target.process_name()
-            )));
+    /// Fails with [`SinkError::TargetGone`] while the target window is
+    /// gone, re-scanning for it at most once per [`TARGET_RESCAN`].
+    fn ensure_target(&mut self) -> Result<(), SinkError> {
+        if self.target.is_alive() {
+            return Ok(());
         }
+        let names = self.target.process_names.clone();
+        if let Some(found) = throttled_rescan(&mut self.last_scan, &names) {
+            info!("target window re-acquired: {}", found.process_name());
+            self.target = found;
+            return Ok(());
+        }
+        Err(SinkError::TargetGone)
+    }
+
+    fn send_key(&mut self, key: Key, message: u32) -> Result<(), SinkError> {
+        self.ensure_target()?;
         // SAFETY: hwnd is a live window handle (checked above); the call
         // only enqueues a keyboard message into that window's queue.
         let _ = unsafe { SendMessageW(self.target.hwnd, message, usize::from(vk_code(key)), 0) };
@@ -391,6 +410,10 @@ impl Win32Sink {
 
 impl InputSink for Win32Sink {
     fn actuate(&mut self, actuation: &Actuation) -> Result<(), SinkError> {
+        // Everything pauses while the target is gone (global mouse input
+        // included: clicking into whatever replaced the window would be
+        // worse than pausing).
+        self.ensure_target()?;
         match *actuation {
             Actuation::KeyDown(key) => {
                 self.send_key(key, WM_KEYDOWN)?;
@@ -470,25 +493,42 @@ const fn release_flags(button: MouseButton) -> u32 {
 }
 
 /// The Win32 focus monitor: compares the foreground window with the
-/// target's handle.
+/// target's handle. Re-acquires the target (rate-limited) when its
+/// process exits, so a restarted game keeps the focus gate working.
 #[derive(Clone, Debug)]
 pub struct Win32Focus {
-    hwnd: HWND,
+    target: TargetWindow,
+    last_scan: Option<Instant>,
+    gone_logged: bool,
 }
 
 impl Win32Focus {
     /// Watches the given target window.
     #[must_use]
     pub fn new(target: &TargetWindow) -> Self {
-        Self { hwnd: target.hwnd }
+        Self { target: target.clone(), last_scan: None, gone_logged: false }
     }
 }
 
 impl FocusMonitor for Win32Focus {
-    fn is_focused(&self) -> Option<bool> {
+    fn is_focused(&mut self) -> Option<bool> {
+        if !self.target.is_alive() {
+            let names = self.target.process_names.clone();
+            if let Some(found) = throttled_rescan(&mut self.last_scan, &names) {
+                info!("target window re-acquired: {}", found.process_name());
+                self.target = found;
+                self.gone_logged = false;
+            } else {
+                if !self.gone_logged {
+                    self.gone_logged = true;
+                    warn!("target window is gone; focus unknown until it returns");
+                }
+                return None;
+            }
+        }
         // SAFETY: the call takes no pointers and only queries desktop
         // state; raw-pointer equality is a plain address comparison.
-        Some(unsafe { GetForegroundWindow() == self.hwnd })
+        Some(unsafe { GetForegroundWindow() == self.target.hwnd })
     }
 
     fn describe(&self) -> String {
@@ -523,7 +563,11 @@ mod tests {
 
     #[test]
     fn sink_accepts_every_configured_key() {
-        let target = TargetWindow { hwnd: std::ptr::null_mut(), process_name: "unused".to_owned() };
+        let target = TargetWindow {
+            hwnd: std::ptr::null_mut(),
+            process_name: "unused".to_owned(),
+            process_names: Vec::new(),
+        };
         let sink = Win32Sink::new(target);
         for &key in Key::ALL {
             assert!(sink.supports(key), "win32 sink must support {}", key.name());

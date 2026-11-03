@@ -12,7 +12,9 @@
 process_names = ["Wow", "Wow-64", "WowClassic"]
 # Keep looking every 2s instead of failing when no process matches.
 wait_for_window = true
-# Stop the clicker when the target window disappears.
+# Stop the clicker when the target window disappears. With false,
+# actuation pauses and resumes when the window comes back (the win32
+# adapters re-scan for it every 2s).
 exit_when_lost = true
 # Only spam while the target window is focused. Requires the Win32 focus
 # monitor (Windows); with the versa-kbm sink on another platform this must
@@ -81,8 +83,8 @@ steps = [
 # ---------------------------------------------------------------------------
 # Sink: where actuations are delivered.
 # backend: auto | win32 | versa-kbm | log
-#   auto       - win32 when the target window is found (Windows),
-#                otherwise versa-kbm when the device is present
+#   auto       - win32 when the target window is found (Windows); while
+#                no window exists, versa-kbm when the device is available
 #   win32      - WM_KEYDOWN/UP messages into the target window (Windows
 #                only); mouse clicks are global SendInput
 #   versa-kbm  - the versa-kbm RP2040 HID device (any OS with hidapi)
@@ -97,7 +99,8 @@ vid = 0x258a
 pid = 0x0100
 # Per-command ack timeout, in milliseconds.
 timeout_ms = 250
-# Release everything on the device when the clicker stops.
+# Release everything on the device when the clicker stops (including on
+# Ctrl+C; a Drop handler releases as a last resort).
 release_on_stop = true
 
 # ---------------------------------------------------------------------------

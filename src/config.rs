@@ -1,9 +1,9 @@
 //! TOML configuration: file schema, loading, and validation into domain
 //! values.
 //!
-//! `config.example.toml` is the checked-in, documented template and must
-//! stay in sync with the structs here in the same change that alters the
-//! schema (a test parses the example file to enforce exactly that).
+//! `config.example.toml` is the checked-in, documented template. A test
+//! parses it, so keys that leave the schema fail the gate; keys missing
+//! from the example are fine and take their defaults.
 
 use std::{
     collections::HashSet,
@@ -419,9 +419,12 @@ fn resolve(file: FileConfig) -> Result<Settings, ConfigError> {
     if let Some(key) = toggle {
         hotkeys_seen.insert(key);
     }
+    let mut names_seen: HashSet<&str> = HashSet::new();
 
-    let (profiles, profile_bindings) = resolve_profiles(&file.profile, &mut hotkeys_seen)?;
-    let (actions, action_bindings) = resolve_actions(&file.action, &mut hotkeys_seen)?;
+    let (profiles, profile_bindings) =
+        resolve_profiles(&file.profile, &mut hotkeys_seen, &mut names_seen)?;
+    let (actions, action_bindings) =
+        resolve_actions(&file.action, &mut hotkeys_seen, &mut names_seen)?;
     let default_profile = resolve_default(
         file.clicker.default_profile.as_ref(),
         &profile_names(&profiles),
@@ -479,14 +482,22 @@ type ProfileSet = (Vec<Profile>, Vec<(Key, usize)>);
 type ActionSet = (Vec<Action>, Vec<(Key, usize)>);
 
 /// Resolves the `[[profile]]` sections and their select hotkeys, guarding
-/// against duplicate hotkey bindings across the whole file.
-fn resolve_profiles(
-    sections: &[ProfileSection],
+/// against duplicate hotkey bindings and duplicate names across the whole
+/// file.
+fn resolve_profiles<'a>(
+    sections: &'a [ProfileSection],
     hotkeys_seen: &mut HashSet<Key>,
+    names_seen: &mut HashSet<&'a str>,
 ) -> Result<ProfileSet, ConfigError> {
     let mut profiles = Vec::new();
     let mut bindings = Vec::new();
     for (idx, section) in sections.iter().enumerate() {
+        if !names_seen.insert(section.name.as_str()) {
+            return Err(ConfigError::Invalid(format!(
+                "profile name '{}' is used more than once",
+                section.name
+            )));
+        }
         validate_range(&format!("profile '{}' interval_ms", section.name), section.interval_ms)?;
         let select = parse_optional_key(
             &format!("profile '{}' select", section.name),
@@ -511,14 +522,22 @@ fn resolve_profiles(
 }
 
 /// Resolves the `[[action]]` sections and their select hotkeys, guarding
-/// against duplicate hotkey bindings across the whole file.
-fn resolve_actions(
-    sections: &[ActionSection],
+/// against duplicate hotkey bindings and duplicate names across the whole
+/// file.
+fn resolve_actions<'a>(
+    sections: &'a [ActionSection],
     hotkeys_seen: &mut HashSet<Key>,
+    names_seen: &mut HashSet<&'a str>,
 ) -> Result<ActionSet, ConfigError> {
     let mut actions = Vec::new();
     let mut bindings = Vec::new();
     for (idx, section) in sections.iter().enumerate() {
+        if !names_seen.insert(section.name.as_str()) {
+            return Err(ConfigError::Invalid(format!(
+                "action name '{}' is used more than once",
+                section.name
+            )));
+        }
         let mut steps = Vec::new();
         for (step_idx, step) in section.steps.iter().enumerate() {
             steps.push(build_step(
@@ -720,6 +739,49 @@ mod tests {
                 matches!(resolved, Err(ConfigError::Invalid(ref message)) if message.contains("more than once")),
                 "expected a duplicate-hotkey rejection, got {resolved:?}"
             );
+        }
+    }
+
+    #[test]
+    fn duplicated_names_are_rejected() {
+        let dup_profile = r#"
+            [[profile]]
+            name = "p"
+            interval_ms = { min = 0, max = 0 }
+
+            [[profile]]
+            name = "p"
+            interval_ms = { min = 1, max = 1 }
+
+            [[action]]
+            name = "a"
+            steps = [{ key = "Q" }]
+        "#;
+        let dup_action = r#"
+            [[profile]]
+            name = "p"
+            interval_ms = { min = 0, max = 0 }
+
+            [[action]]
+            name = "a"
+            steps = [{ key = "Q" }]
+
+            [[action]]
+            name = "a"
+            steps = [{ key = "W" }]
+        "#;
+        for (raw, section) in [(dup_profile, "profile"), (dup_action, "action")] {
+            let parsed = toml::from_str::<FileConfig>(raw);
+            assert!(parsed.is_ok(), "fixture must parse: {:?}", parsed.as_ref().err());
+            if let Ok(file) = parsed {
+                let resolved = resolve(file);
+                assert!(
+                    matches!(resolved, Err(ConfigError::Invalid(ref message))
+                        if message.contains(&format!("{section} name 'p' is used"))
+                            || message.contains(&format!("{section} name 'a' is used"))),
+                    "expected a duplicate-{section}-name rejection, got {resolved:?}"
+                );
+            }
         }
     }
 

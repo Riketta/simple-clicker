@@ -16,6 +16,12 @@ pub enum SinkError {
     /// The sink cannot express this key in its code space.
     #[error("key {0} is not supported by this input adapter")]
     Unsupported(Key),
+    /// The sink's bound target window is gone (its process exited). Not a
+    /// transport failure: the driver pauses instead of counting it, and
+    /// actuation resumes once the sink re-acquires a target (or stops,
+    /// per `target.exit_when_lost`).
+    #[error("target window is gone")]
+    TargetGone,
 }
 
 /// Outbound port: delivers the engine's actuations to some virtual keyboard
@@ -25,7 +31,9 @@ pub enum SinkError {
 /// [`Actuation::ReleaseAll`] releases everything the sink may hold, and
 /// every down actuation is paired by the engine with an up (immediately,
 /// on the schedule, or at shutdown via
-/// [`Actuation::ReleaseAll`]).
+/// [`Actuation::ReleaseAll`]). Window-bound sinks re-acquire a restarted
+/// target themselves (rate-limited) and report
+/// [`SinkError::TargetGone`] while none is reachable.
 pub trait InputSink {
     /// Delivers one actuation. Errors do not stop the clicker by
     /// themselves; the driver counts consecutive failures.

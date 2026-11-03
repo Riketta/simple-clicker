@@ -432,18 +432,16 @@ impl Engine {
     /// Human-readable names of the configured profiles and their hotkeys.
     #[must_use]
     pub fn profile_summary(&self) -> Vec<String> {
-        let bindings: Vec<Option<Key>> = self
-            .bindings
-            .profiles
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(i, (key, idx))| if idx == i { Some(key) } else { None })
-            .collect();
+        let mut slots = vec![None; self.profiles.len()];
+        for (key, idx) in &self.bindings.profiles {
+            if let Some(slot) = slots.get_mut(*idx) {
+                *slot = Some(*key);
+            }
+        }
         self.profiles
             .iter()
-            .enumerate()
-            .map(|(i, profile)| match bindings.get(i).copied().flatten() {
+            .zip(slots)
+            .map(|(profile, slot)| match slot {
                 Some(key) => format!("{} [{}]", profile.name, key),
                 None => format!("{} [unbound]", profile.name),
             })
@@ -453,22 +451,27 @@ impl Engine {
     /// Human-readable names of the configured actions and their hotkeys.
     #[must_use]
     pub fn action_summary(&self) -> Vec<String> {
-        let bindings: Vec<Option<Key>> = self
-            .bindings
-            .actions
-            .iter()
-            .copied()
-            .enumerate()
-            .map(|(i, (key, idx))| if idx == i { Some(key) } else { None })
-            .collect();
+        let mut slots = vec![None; self.actions.len()];
+        for (key, idx) in &self.bindings.actions {
+            if let Some(slot) = slots.get_mut(*idx) {
+                *slot = Some(*key);
+            }
+        }
         self.actions
             .iter()
-            .enumerate()
-            .map(|(i, action)| match bindings.get(i).copied().flatten() {
+            .zip(slots)
+            .map(|(action, slot)| match slot {
                 Some(key) => format!("{} [{}]", action.name, key),
                 None => format!("{} [unbound]", action.name),
             })
             .collect()
+    }
+
+    /// The keys that select commands (toggle, profile, and action
+    /// hotkeys); the watch list for hotkey adapters.
+    #[must_use]
+    pub fn hotkeys(&self) -> Vec<Key> {
+        self.bindings.hotkeys()
     }
 
     /// Every key configured anywhere (spam keys and hotkeys); the sink
@@ -826,6 +829,20 @@ mod tests {
         keys.dedup();
         assert!(keys.contains(&Key::Q));
         assert!(keys.contains(&Key::Numpad4));
+    }
+
+    #[test]
+    fn summaries_handle_partially_bound_configs() {
+        let eng = Engine::new(
+            vec![human_profile(), super_profile()],
+            vec![single_key_action("interact", Key::Numpad0), single_key_action("spell", Key::Q)],
+            Bindings::new(Some(Key::Numpad4), vec![(Key::Numpad5, 1)], vec![(Key::Numpad2, 1)]),
+            EngineOptions { added_delay_ms: 0, require_focus: false, global_hotkeys: true },
+        );
+        // The first profile/action is unbound; the later bindings must
+        // still render on the right entries.
+        assert_eq!(eng.profile_summary(), vec!["human [unbound]", "super [Numpad5]"]);
+        assert_eq!(eng.action_summary(), vec!["interact [unbound]", "spell [Numpad2]"]);
     }
 
     #[test]

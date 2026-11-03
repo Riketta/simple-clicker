@@ -18,9 +18,9 @@ allow = [
 ]
 confidence-threshold = 0.93
 
-# The versa-kbm crates arrive as local path dependencies without SPDX
-# metadata in their manifests; they are first-party code (same author as
-# this project), distributed under MIT.
+# The versa-kbm crates arrive as git dependencies (branch `main`, pinned
+# by Cargo.lock) without SPDX metadata in their manifests; they are
+# first-party code (same author as this project), distributed under MIT.
 [[licenses.clarify]]
 name = "vkbm-cli"
 expression = "MIT"

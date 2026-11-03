@@ -40,8 +40,13 @@ adapters -> ports -> domain -> (nothing)
   and `cfg`; feature gating lives in `Cargo.toml`, and a plain
   `cargo build` (no default features) must succeed on every host.
 - Failure semantics: sink/hotkey failures are reported through port error
-  enums and never panic; focus reads that cannot be answered return
-  `None` and the engine withholds presses but always releases.
+  enums and never panic; `SinkError::TargetGone` (lost target window) is
+  not counted as a transport failure — the driver pauses actuation
+  (`exit_when_lost = false`; the win32 adapters re-acquire the window
+  themselves) or stops (`true`). Focus reads that cannot be answered
+  return `None` and the engine withholds presses but always releases.
+  Ctrl+C is a polled stop flag: the driver releases held inputs and exits
+  with code 130.
 
 ## Layout
 
@@ -65,8 +70,9 @@ adapters -> ports -> domain -> (nothing)
 - Logging: `tracing`, structured fields; level from `[logging]` with
   `RUST_LOG` override.
 - `config.example.toml` is a contract: update it in the same change that
-  alters the schema in `src/config.rs` — a test parses the example file to
-  enforce exactly this.
+  alters the schema in `src/config.rs` — a test parses the example file,
+  so keys that leave the schema fail the gate; keys missing from the
+  example take their defaults.
 - The domain speaks only in neutral key/button values; adding a new input
   backend means adding an adapter plus a mapping table, never a domain
   change.
@@ -83,8 +89,9 @@ no-default and all-features):
 2. `cargo clippy --all-targets --all-features --locked -- -D warnings`
 3. `cargo clippy --all-targets --no-default-features --locked -- -D warnings`
 4. `cargo clippy --all-targets --locked -- -D warnings`
-5. `cargo test --locked`
-6. `cargo build --locked`
+5. `cargo test --no-default-features --locked`
+6. `cargo test --locked`
+7. `cargo build --locked`
 
 Plus `cargo deny check` when touching dependencies.
 

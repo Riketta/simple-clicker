@@ -1,8 +1,11 @@
+name: CI
+
 # CI gate for simple-clicker. The local gate IS this gate: same commands,
 # same order (see AGENTS.md).
-#   linux:   core gate - fmt / clippy (3 feature combos) / test / build / deny
-#   windows: native tool gate - clippy (default + all-features) / test / build
-#   release + publish: packaged archives on v* tags
+#   linux:   core gate - fmt / clippy (3 feature combos) / test (default +
+#            no-default) / build / deny
+#   windows: native tool gate - clippy (3 feature combos) / test / build
+#   release + publish: packaged archives on v* tags (gated on both jobs)
 # Formatting runs under nightly rustfmt (rustfmt.toml uses unstable
 # options). Everything else uses the toolchain pinned by
 # rust-toolchain.toml.
@@ -58,14 +61,14 @@ jobs:
       - name: Format (nightly rustfmt options)
         run: cargo +nightly fmt --all -- --check
 
-      - name: Clippy (default features)
-        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Clippy (all features)
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
       - name: Clippy (no default features)
         run: cargo clippy --all-targets --no-default-features --locked -- -D warnings
 
-      - name: Clippy (all features)
-        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      - name: Clippy (default features)
+        run: cargo clippy --all-targets --locked -- -D warnings
 
       - name: Tests
         run: cargo test --locked
@@ -91,14 +94,14 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Clippy (default features)
-        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Clippy (all features)
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
       - name: Clippy (no default features)
         run: cargo clippy --all-targets --no-default-features --locked -- -D warnings
 
-      - name: Clippy (all features)
-        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      - name: Clippy (default features)
+        run: cargo clippy --all-targets --locked -- -D warnings
 
       - name: Tests
         run: cargo test --locked
@@ -110,7 +113,7 @@ jobs:
     name: Release · ${{ matrix.target }}
     # Builds on tags and manual dispatch; PUBLISH stays tag-only below.
     if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
-    needs: [linux]
+    needs: [linux, windows]
     strategy:
       fail-fast: false
       matrix:
