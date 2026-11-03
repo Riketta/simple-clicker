@@ -92,9 +92,10 @@ Rules: read the clippy exit status and `error:` lines, not the warning
 count; `cargo test` does not execute clippy lints; dependency changes ship
 an updated lockfile (every cargo gate runs `--locked`).
 
-The versa-kbm adapter depends on a checkout of
-`Riketta/versa-kbm` at `../WoW Goop/versa-kbm` (relative path dependency);
-CI clones it to the same location before building `--all-features`.
+The versa-kbm adapter depends on the GitHub repo `Riketta/versa-kbm`
+(branch `main`, git dependency, pinned to an exact commit by the
+lockfile); bump it with `cargo update -p vkbm-cli`. To test local
+versa-kbm changes, temporarily swap the dependency back to a path.
 
 ## Documentation maintenance
 

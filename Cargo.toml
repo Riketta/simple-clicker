@@ -34,13 +34,16 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Optional multi-platform adapters; a plain `cargo build` (no default
 # features) must always succeed on every target.
+#
+# versa-kbm comes from GitHub (branch `main`, pinned to an exact commit
+# by Cargo.lock); update it with `cargo update -p vkbm-cli`.
 rdev = { version = "0.5", optional = true }
-vkbm-cli = { path = "../WoW Goop/versa-kbm/crates/vkbm-cli", optional = true }
-# Direct re-exports of the versa-kbm stack's own types (same versions as
-# vkbm-cli's, unified by cargo): the adapter maps domain keys onto HID
-# usages and opens the HID manager itself.
+vkbm-cli = { git = "https://github.com/Riketta/versa-kbm", branch = "main", optional = true }
+# Direct re-exports of the versa-kbm stack's own types (same source and
+# versions as vkbm-cli's, unified by cargo): the adapter maps domain keys
+# onto HID usages and opens the HID manager itself.
 hidapi = { version = "2", optional = true }
-vkbm-proto = { path = "../WoW Goop/versa-kbm/crates/vkbm-proto", optional = true }
+vkbm-proto = { git = "https://github.com/Riketta/versa-kbm", branch = "main", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", optional = true, features = [

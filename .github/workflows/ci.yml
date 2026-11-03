@@ -7,9 +7,9 @@
 # options). Everything else uses the toolchain pinned by
 # rust-toolchain.toml.
 #
-# The versa-kbm adapter is a relative path dependency
-# (`../WoW Goop/versa-kbm`); jobs that build --all-features clone it to
-# that exact location first.
+# The versa-kbm adapter is a git dependency (Riketta/versa-kbm, branch
+# `main`, pinned by Cargo.lock); cargo fetches it on every
+# --all-features build, no extra checkout step needed.
 
 name: CI
 
@@ -55,12 +55,6 @@ jobs:
           sudo apt-get update &&
           sudo apt-get install -y libudev-dev libx11-dev libxi-dev libxtst-dev
 
-      # The versa-kbm adapter resolves through a relative path dependency;
-      # place a checkout exactly where the manifest expects it.
-      - name: Check out versa-kbm
-        shell: bash
-        run: git clone --depth 1 https://github.com/Riketta/versa-kbm "../WoW Goop/versa-kbm"
-
       - name: Format (nightly rustfmt options)
         run: cargo +nightly fmt --all -- --check
 
@@ -96,10 +90,6 @@ jobs:
           components: clippy
 
       - uses: Swatinem/rust-cache@v2
-
-      - name: Check out versa-kbm
-        shell: bash
-        run: git clone --depth 1 https://github.com/Riketta/versa-kbm "../WoW Goop/versa-kbm"
 
       - name: Clippy (default features)
         run: cargo clippy --all-targets --locked -- -D warnings
@@ -147,10 +137,6 @@ jobs:
         run: >
           sudo apt-get update &&
           sudo apt-get install -y libudev-dev libx11-dev libxi-dev libxtst-dev
-
-      - name: Check out versa-kbm
-        shell: bash
-        run: git clone --depth 1 https://github.com/Riketta/versa-kbm "../WoW Goop/versa-kbm"
 
       - name: Build release binary (all adapters)
         run: cargo build --release --locked --all-features --target ${{ matrix.target }}
