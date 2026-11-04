@@ -674,6 +674,8 @@ mod tests {
     use super::{
         ConfigError,
         FileConfig,
+        HotkeyBackend,
+        SinkBackend,
         load,
         resolve,
     };
@@ -896,6 +898,181 @@ mod tests {
                 matches!(resolved, Err(ConfigError::Invalid(ref message)) if message.contains("default_profile")),
                 "expected a default-profile rejection, got {resolved:?}"
             );
+        }
+    }
+
+    #[test]
+    fn unknown_default_action_is_rejected() {
+        let parsed = toml::from_str::<FileConfig>(BASE);
+        assert!(parsed.is_ok(), "fixture must parse: {:?}", parsed.as_ref().err());
+        if let Ok(mut file) = parsed {
+            file.clicker.default_action = Some("nope".to_owned());
+            let resolved = resolve(file);
+            assert!(
+                matches!(resolved, Err(ConfigError::Invalid(ref message)) if message.contains("default_action")),
+                "expected a default-action rejection, got {resolved:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_profile_sections_are_rejected() {
+        // Every section defaults: no [[profile]] at all.
+        let parsed = toml::from_str::<FileConfig>("");
+        assert!(parsed.is_ok(), "empty file must parse: {:?}", parsed.as_ref().err());
+        if let Ok(file) = parsed {
+            let resolved = resolve(file);
+            assert!(
+                matches!(resolved, Err(ConfigError::Invalid(ref message)) if message.contains("[[profile]]")),
+                "expected a missing-profile rejection, got {resolved:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_action_sections_are_rejected() {
+        let raw = r#"
+            [[profile]]
+            name = "p"
+            interval_ms = { min = 0, max = 0 }
+        "#;
+        let parsed = toml::from_str::<FileConfig>(raw);
+        assert!(parsed.is_ok(), "fixture must parse: {:?}", parsed.as_ref().err());
+        if let Ok(file) = parsed {
+            let resolved = resolve(file);
+            assert!(
+                matches!(resolved, Err(ConfigError::Invalid(ref message)) if message.contains("[[action]]")),
+                "expected a missing-action rejection, got {resolved:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_steps_list_is_rejected() {
+        let raw = r#"
+            [[profile]]
+            name = "p"
+            interval_ms = { min = 0, max = 0 }
+
+            [[action]]
+            name = "a"
+            steps = []
+        "#;
+        let parsed = toml::from_str::<FileConfig>(raw);
+        assert!(parsed.is_ok(), "fixture must parse: {:?}", parsed.as_ref().err());
+        if let Ok(file) = parsed {
+            let resolved = resolve(file);
+            assert!(
+                matches!(resolved, Err(ConfigError::Invalid(ref message)) if message.contains("has no steps")),
+                "expected an empty-steps rejection, got {resolved:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_hotkey_backend_is_rejected() {
+        let parsed = toml::from_str::<FileConfig>(BASE);
+        assert!(parsed.is_ok(), "fixture must parse: {:?}", parsed.as_ref().err());
+        if let Ok(mut file) = parsed {
+            file.hotkeys.backend = Some("telepathy".to_owned());
+            let resolved = resolve(file);
+            assert!(
+                matches!(resolved, Err(ConfigError::Invalid(ref message)) if message.contains("hotkeys.backend")),
+                "expected a hotkey-backend rejection, got {resolved:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_button_names_are_rejected() {
+        let raw = r#"
+            [[profile]]
+            name = "p"
+            interval_ms = { min = 0, max = 0 }
+
+            [[action]]
+            name = "a"
+            steps = [{ button = "hyper" }]
+        "#;
+        let parsed = toml::from_str::<FileConfig>(raw);
+        assert!(parsed.is_ok(), "fixture must parse: {:?}", parsed.as_ref().err());
+        if let Ok(file) = parsed {
+            let resolved = resolve(file);
+            assert!(
+                matches!(resolved, Err(ConfigError::Invalid(ref message)) if message.contains("unknown button")),
+                "expected an unknown-button rejection, got {resolved:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_toml_is_reported_as_a_parse_error() {
+        let path = std::env::temp_dir().join("simple-clicker-invalid-config-test.toml");
+        if std::fs::write(&path, "not [ valid").is_err() {
+            // No writable temp dir in this environment; the variant's
+            // plumbing stays unexercised rather than misasserted.
+            return;
+        }
+        let result = load(&path);
+        let _ = std::fs::remove_file(&path);
+        assert!(
+            matches!(result, Err(ConfigError::Parse { .. })),
+            "expected a parse error, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn backend_values_are_case_insensitive_and_aliasable() {
+        assert_eq!(SinkBackend::parse("Auto"), Some(SinkBackend::Auto));
+        assert_eq!(SinkBackend::parse("WIN32"), Some(SinkBackend::Win32));
+        assert_eq!(SinkBackend::parse("Versa-KBM"), Some(SinkBackend::VersaKbm));
+        assert_eq!(SinkBackend::parse("versa_kbm"), Some(SinkBackend::VersaKbm));
+        assert_eq!(SinkBackend::parse("LOG"), Some(SinkBackend::Log));
+        assert_eq!(SinkBackend::parse("telepathy"), None);
+        assert_eq!(HotkeyBackend::parse("Rdev"), Some(HotkeyBackend::Rdev));
+        assert_eq!(HotkeyBackend::parse("auto"), Some(HotkeyBackend::Auto));
+        assert_eq!(HotkeyBackend::parse("telepathy"), None);
+    }
+
+    #[test]
+    fn named_defaults_select_the_starting_profile_and_action() {
+        let raw = r#"
+            [clicker]
+            toggle_key = "T"
+            default_profile = "p2"
+            default_action = "a2"
+
+            [[profile]]
+            name = "p1"
+            interval_ms = { min = 10, max = 30 }
+
+            [[profile]]
+            name = "p2"
+            interval_ms = { min = 0, max = 0 }
+
+            [[action]]
+            name = "a1"
+            steps = [{ key = "Q" }]
+
+            [[action]]
+            name = "a2"
+            steps = [{ key = "W" }]
+        "#;
+        let parsed = toml::from_str::<FileConfig>(raw);
+        assert!(parsed.is_ok(), "fixture must parse: {:?}", parsed.as_ref().err());
+        if let Ok(file) = parsed {
+            let resolved = resolve(file);
+            assert!(resolved.is_ok(), "fixture must validate: {:?}", resolved.as_ref().err());
+            if let Ok(mut settings) = resolved {
+                // Toggling on starts the engine on the named defaults; the
+                // running banner names the pair it picked.
+                settings.engine.handle_keys(&[crate::domain::key::Key::T], 0, None);
+                let described = settings.engine.describe();
+                assert!(
+                    described.starts_with("clicking p2 / a2"),
+                    "named defaults must select p2 / a2, got {described}"
+                );
+            }
         }
     }
 }

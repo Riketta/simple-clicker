@@ -453,6 +453,18 @@ impl InputSink for Win32Sink {
     }
 }
 
+impl Drop for Win32Sink {
+    /// Best-effort release of anything still held on paths that skip the
+    /// driver's normal shutdown (panics, early returns): a held key must
+    /// always be let go. A gone window keeps nothing latched, so its
+    /// release is skipped (matching [`Self::release_all`]'s rationale).
+    fn drop(&mut self) {
+        if self.target.is_alive() {
+            self.release_all();
+        }
+    }
+}
+
 /// Sends one global mouse-button event through `SendInput`.
 fn send_mouse(flags: u32) -> Result<(), SinkError> {
     let input = INPUT {
@@ -538,15 +550,37 @@ impl FocusMonitor for Win32Focus {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::{
         TargetWindow,
+        Win32Focus,
         Win32Sink,
         vk_code,
+        wide_cstr,
     };
     use crate::{
-        domain::key::Key,
-        ports::driven::InputSink,
+        domain::{
+            engine::Actuation,
+            key::{
+                Key,
+                MouseButton,
+            },
+        },
+        ports::driven::{
+            FocusMonitor,
+            InputSink,
+            SinkError,
+        },
     };
+
+    fn dead_target() -> TargetWindow {
+        TargetWindow {
+            hwnd: std::ptr::null_mut(),
+            process_name: "unused".to_owned(),
+            process_names: Vec::new(),
+        }
+    }
 
     #[test]
     fn vk_mapping_is_total_and_distinct_for_distinct_keys() {
@@ -562,16 +596,57 @@ mod tests {
     }
 
     #[test]
+    fn vk_code_maps_every_key_onto_a_nonzero_code() {
+        // The Enter/NumpadEnter collision (both 0x0D) is the one legitimate
+        // alias; every other key must own its own nonzero code.
+        let mut seen = HashSet::new();
+        for &key in Key::ALL {
+            let code = vk_code(key);
+            assert_ne!(code, 0, "{} must map to a real VK code", key.name());
+            if matches!(key, Key::Enter | Key::NumpadEnter) {
+                continue;
+            }
+            assert!(seen.insert(code), "{key:?} shares VK code 0x{code:02X}");
+        }
+        assert_eq!(vk_code(Key::Enter), vk_code(Key::NumpadEnter), "the 0x0D alias");
+    }
+
+    #[test]
     fn sink_accepts_every_configured_key() {
-        let target = TargetWindow {
-            hwnd: std::ptr::null_mut(),
-            process_name: "unused".to_owned(),
-            process_names: Vec::new(),
-        };
-        let sink = Win32Sink::new(target);
+        let sink = Win32Sink::new(dead_target());
         for &key in Key::ALL {
             assert!(sink.supports(key), "win32 sink must support {}", key.name());
         }
+    }
+
+    #[test]
+    fn actuate_reports_target_gone_for_a_dead_window() {
+        let mut sink = Win32Sink::new(dead_target());
+        let actuations = [
+            Actuation::KeyDown(Key::Q),
+            Actuation::KeyUp(Key::Q),
+            Actuation::MouseDown(MouseButton::Left),
+            Actuation::MouseUp(MouseButton::Left),
+            Actuation::ReleaseAll,
+        ];
+        for actuation in &actuations {
+            let result = sink.actuate(actuation);
+            assert!(
+                matches!(result, Err(SinkError::TargetGone)),
+                "{actuation:?} on a dead window must report TargetGone, got {result:?}"
+            );
+        }
+        // The failed press must not have latched anything.
+        assert!(sink.held_keys.is_empty() && sink.held_buttons.is_empty());
+        assert!(!sink.is_target_alive());
+    }
+
+    #[test]
+    fn focus_is_unknown_while_the_target_window_is_gone() {
+        let mut focus = Win32Focus::new(&dead_target());
+        // Empty process_names make the rescan a no-op, so the monitor
+        // cannot answer and must say so rather than guess.
+        assert_eq!(focus.is_focused(), None);
     }
 
     #[test]
@@ -580,6 +655,24 @@ mod tests {
         for (slot, unit) in buf.iter_mut().zip("Wow-64.exe".encode_utf16()) {
             *slot = unit;
         }
-        assert_eq!(super::wide_cstr(&buf), "Wow-64.exe");
+        assert_eq!(wide_cstr(&buf), "Wow-64.exe");
+    }
+
+    #[test]
+    fn wide_cstr_decodes_a_full_buffer_without_a_terminator() {
+        let mut buf = [0u16; 260];
+        for (slot, unit) in buf.iter_mut().zip("X".repeat(260).encode_utf16()) {
+            *slot = unit;
+        }
+        assert_eq!(wide_cstr(&buf), "X".repeat(260));
+    }
+
+    #[test]
+    fn wide_cstr_replaces_invalid_utf16_lossily() {
+        let mut buf = [0u16; 260];
+        buf[0] = 0xD8_35; // unpaired high surrogate
+        buf[1] = b'a'.into();
+        buf[2] = 0;
+        assert_eq!(wide_cstr(&buf), "\u{FFFD}a");
     }
 }

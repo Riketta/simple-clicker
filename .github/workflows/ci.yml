@@ -3,7 +3,7 @@ name: CI
 # CI gate for simple-clicker. The local gate IS this gate: same commands,
 # same order (see AGENTS.md).
 #   linux:   core gate - fmt / clippy (3 feature combos) / test (default +
-#            no-default) / build / deny
+#            no-default + all-features) / build / deny
 #   windows: native tool gate - clippy (3 feature combos) / test / build
 #   release + publish: packaged archives on v* tags (gated on both jobs)
 # Formatting runs under nightly rustfmt (rustfmt.toml uses unstable
@@ -73,6 +73,11 @@ jobs:
 
       - name: Tests (no default features)
         run: cargo test --no-default-features --locked
+
+      # Runs the feature-gated adapter tests (versa-kbm reply mapping,
+      # rdev key table) that the default-feature runs never compile.
+      - name: Tests (all features)
+        run: cargo test --all-features --locked
 
       - name: Build
         run: cargo build --locked

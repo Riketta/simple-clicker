@@ -113,18 +113,24 @@ impl VersaKbmSink {
 
     fn request(&mut self, command: Command) -> Result<(), SinkError> {
         match self.client.request(&command, self.timeout) {
-            // Echo means the device is in dry-run mode: accepted, not
-            // actuated. The sink treats it as success and lets the driver
-            // keep going.
-            Ok(Reply::Ok | Reply::Echo) => Ok(()),
-            Ok(Reply::Err(code)) => Err(SinkError::Transport(match code {
-                ErrorCode::Disabled => "hardware switch is off (BOOTSEL)".to_owned(),
-                ErrorCode::Disarmed => "device is disarmed (send `vkbm arm`)".to_owned(),
-                other => format!("device refused {command:?}: {other:?}"),
-            })),
-            Ok(Reply::Info { .. }) => Err(SinkError::Transport("unexpected Info reply".to_owned())),
+            Ok(reply) => translate_reply(reply, command),
             Err(err) => Err(SinkError::Transport(err.to_string())),
         }
+    }
+}
+
+/// Translates one device reply: `Echo` means the device is in dry-run
+/// mode (accepted, not actuated), and well-known rejections get
+/// actionable messages.
+fn translate_reply(reply: Reply, command: Command) -> Result<(), SinkError> {
+    match reply {
+        Reply::Ok | Reply::Echo => Ok(()),
+        Reply::Err(code) => Err(SinkError::Transport(match code {
+            ErrorCode::Disabled => "hardware switch is off (BOOTSEL)".to_owned(),
+            ErrorCode::Disarmed => "device is disarmed (send `vkbm arm`)".to_owned(),
+            other => format!("device refused {command:?}: {other:?}"),
+        })),
+        Reply::Info { .. } => Err(SinkError::Transport("unexpected Info reply".to_owned())),
     }
 }
 
@@ -135,12 +141,19 @@ impl InputSink for VersaKbmSink {
                 self.released = false;
                 self.request(Command::KeyDown { usage: hid_usage(key) })
             }
-            Actuation::KeyUp(key) => self.request(Command::KeyUp { usage: hid_usage(key) }),
+            // Any up after a release-all means input is latched again, so
+            // the `Drop` release must re-arm (the engine pairs every down
+            // with an up, so this is also the normal per-tap pattern).
+            Actuation::KeyUp(key) => {
+                self.released = false;
+                self.request(Command::KeyUp { usage: hid_usage(key) })
+            }
             Actuation::MouseDown(button) => {
                 self.released = false;
                 self.request(Command::MouseDown { button: map_button(button) })
             }
             Actuation::MouseUp(button) => {
+                self.released = false;
                 self.request(Command::MouseUp { button: map_button(button) })
             }
             Actuation::ReleaseAll => {
@@ -290,10 +303,19 @@ const fn hid_usage(key: Key) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use vkbm_proto::keyboard::KeyboardState;
-
-    use super::hid_usage;
     use crate::domain::key::Key;
+    use crate::ports::driven::SinkError;
+    use vkbm_proto::keyboard::KeyboardState;
+    use vkbm_proto::{
+        Command,
+        ErrorCode,
+        Reply,
+    };
+
+    use super::{
+        hid_usage,
+        translate_reply,
+    };
 
     #[test]
     fn every_usage_is_reportable_on_the_device_descriptor() {
@@ -318,5 +340,35 @@ mod tests {
         assert_eq!(hid_usage(Key::Space), 0x2C);
         assert_eq!(hid_usage(Key::Escape), 0x29);
         assert_eq!(hid_usage(Key::LShift), 0xE1);
+    }
+
+    #[test]
+    fn replies_translate_into_sink_results() {
+        let command = Command::ReleaseAll;
+        assert!(translate_reply(Reply::Ok, command).is_ok(), "an explicit Ok must succeed");
+        assert!(
+            translate_reply(Reply::Echo, command).is_ok(),
+            "Echo (dry-run ack) must be treated as success"
+        );
+        let disabled = translate_reply(Reply::Err(ErrorCode::Disabled), command);
+        assert!(
+            matches!(&disabled, Err(SinkError::Transport(message)) if message.contains("BOOTSEL")),
+            "Disabled must point at the hardware switch, got {disabled:?}"
+        );
+        let disarmed = translate_reply(Reply::Err(ErrorCode::Disarmed), command);
+        assert!(
+            matches!(&disarmed, Err(SinkError::Transport(message)) if message.contains("vkbm arm")),
+            "Disarmed must suggest `vkbm arm`, got {disarmed:?}"
+        );
+        let refused = translate_reply(Reply::Err(ErrorCode::KeyboardFull), command);
+        assert!(
+            matches!(&refused, Err(SinkError::Transport(message)) if message.contains("refused")),
+            "other rejections must carry the refusal, got {refused:?}"
+        );
+        let info = translate_reply(Reply::Info { major: 1, minor: 0, flags: 0 }, command);
+        assert!(
+            matches!(&info, Err(SinkError::Transport(message)) if message.contains("unexpected Info")),
+            "an out-of-place Info must be a transport error, got {info:?}"
+        );
     }
 }

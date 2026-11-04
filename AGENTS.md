@@ -90,8 +90,9 @@ no-default and all-features):
 3. `cargo clippy --all-targets --no-default-features --locked -- -D warnings`
 4. `cargo clippy --all-targets --locked -- -D warnings`
 5. `cargo test --no-default-features --locked`
-6. `cargo test --locked`
-7. `cargo build --locked`
+6. `cargo test --all-features --locked`
+7. `cargo test --locked`
+8. `cargo build --locked`
 
 Plus `cargo deny check` when touching dependencies.
 

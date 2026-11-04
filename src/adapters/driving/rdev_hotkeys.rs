@@ -195,3 +195,58 @@ fn map_key(key: rdev::Key) -> Option<Key> {
         | rdev::Key::Unknown(_) => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::map_key;
+    use crate::domain::key::Key;
+
+    #[test]
+    fn the_mapping_table_is_pinned() {
+        // The exhaustive match makes omissions a compile error; this table
+        // pins the associations themselves (a wrong entry would silently
+        // send the wrong key). Letters, digits and function keys map
+        // identically, so the interesting cases are the renamed ones.
+        let cases: &[(rdev::Key, Option<Key>)] = &[
+            (rdev::Key::KeyQ, Some(Key::Q)),
+            (rdev::Key::Num5, Some(Key::Num5)),
+            (rdev::Key::Kp5, Some(Key::Numpad5)),
+            (rdev::Key::Kp0, Some(Key::Numpad0)),
+            (rdev::Key::KpReturn, Some(Key::NumpadEnter)),
+            (rdev::Key::KpMinus, Some(Key::NumpadSubtract)),
+            (rdev::Key::KpPlus, Some(Key::NumpadAdd)),
+            (rdev::Key::KpMultiply, Some(Key::NumpadMultiply)),
+            (rdev::Key::KpDivide, Some(Key::NumpadDivide)),
+            (rdev::Key::Return, Some(Key::Enter)),
+            (rdev::Key::LeftArrow, Some(Key::Left)),
+            (rdev::Key::DownArrow, Some(Key::Down)),
+            (rdev::Key::ShiftLeft, Some(Key::LShift)),
+            (rdev::Key::ShiftRight, Some(Key::RShift)),
+            (rdev::Key::ControlLeft, Some(Key::LCtrl)),
+            (rdev::Key::ControlRight, Some(Key::RCtrl)),
+            (rdev::Key::Alt, Some(Key::LAlt)),
+            (rdev::Key::AltGr, Some(Key::RAlt)),
+            (rdev::Key::Minus, Some(Key::Minus)),
+            (rdev::Key::Equal, Some(Key::Equals)),
+            (rdev::Key::LeftBracket, Some(Key::LBracket)),
+            (rdev::Key::RightBracket, Some(Key::RBracket)),
+            (rdev::Key::BackSlash, Some(Key::Backslash)),
+            (rdev::Key::SemiColon, Some(Key::Semicolon)),
+            (rdev::Key::Quote, Some(Key::Apostrophe)),
+            (rdev::Key::BackQuote, Some(Key::Backquote)),
+            (rdev::Key::Comma, Some(Key::Comma)),
+            (rdev::Key::Dot, Some(Key::Period)),
+            (rdev::Key::Slash, Some(Key::Slash)),
+            (rdev::Key::CapsLock, None),
+            (rdev::Key::MetaLeft, None),
+            (rdev::Key::NumLock, None),
+            (rdev::Key::PrintScreen, None),
+            (rdev::Key::Pause, None),
+            (rdev::Key::Function, None),
+            (rdev::Key::Unknown(0), None),
+        ];
+        for &(raw, expected) in cases {
+            assert_eq!(map_key(raw), expected, "rdev key {raw:?} maps wrong");
+        }
+    }
+}

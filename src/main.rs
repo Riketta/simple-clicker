@@ -51,6 +51,7 @@ use simple_clicker::{
         HotkeyBackend,
         Settings,
         SinkBackend,
+        SinkSettings,
     },
     domain::{
         engine::{
@@ -64,6 +65,7 @@ use simple_clicker::{
             Clock,
             FocusMonitor,
             InputSink,
+            Jitter,
             SinkError,
         },
         driving::HotkeySource,
@@ -207,18 +209,7 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
         );
     }
 
-    info!("### Simple Clicker v{} ###", env!("CARGO_PKG_VERSION"));
-    info!("[!] Sink: {}", sink.describe());
-    info!("[!] Hotkeys: {}", hotkeys.describe());
-    if let Some(monitor) = &focus {
-        info!("[!] Focus: {}", monitor.describe());
-    }
-    if let Some(toggle) = settings.engine.toggle_key() {
-        info!("[!] Toggle: [{toggle}]");
-    }
-    info!("[!] Profiles: {}", settings.engine.profile_summary().join(", "));
-    info!("[!] Actions: {}", settings.engine.action_summary().join(", "));
-    info!("[!] {}", settings.engine.describe());
+    banner(&settings, sink.as_ref(), hotkeys.as_ref(), focus.as_deref());
 
     let mut unsupported = settings
         .engine
@@ -233,9 +224,16 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
         bail!("input sink does not support these configured keys: {}", unsupported.join(", "));
     }
 
-    let release_all = release_on_stop(&settings, sink_backend);
+    let release_all = release_on_stop(&settings.sink, sink_backend);
     let reason = drive(
-        DriveStack { hotkeys, focus, sink, engine: settings.engine },
+        DriveStack {
+            hotkeys,
+            focus,
+            sink,
+            engine: settings.engine,
+            clock: Box::new(SystemClock::new()),
+            jitter: Box::new(SystemJitter::new()),
+        },
         &stop,
         settings.target.exit_when_lost,
         release_all,
@@ -252,9 +250,12 @@ struct DriveStack {
     focus: Option<Box<dyn FocusMonitor>>,
     sink: Box<dyn InputSink>,
     engine: Engine,
+    clock: Box<dyn Clock>,
+    jitter: Box<dyn Jitter>,
 }
 
 /// Why the driver loop ended.
+#[derive(Debug)]
 enum StopReason {
     /// The target window disappeared and `exit_when_lost` asked for a
     /// stop.
@@ -271,9 +272,7 @@ fn drive(
     exit_when_lost: bool,
     release_all_on_stop: bool,
 ) -> anyhow::Result<StopReason> {
-    let DriveStack { mut hotkeys, mut focus, mut sink, mut engine } = stack;
-    let clock = SystemClock::new();
-    let mut jitter = SystemJitter::new();
+    let DriveStack { mut hotkeys, mut focus, mut sink, mut engine, clock, mut jitter } = stack;
     let mut consecutive_failures = 0u32;
     let mut target_paused = false;
 
@@ -291,7 +290,7 @@ fn drive(
         let pressed = hotkeys.poll();
         let focus_now = focus.as_mut().and_then(|monitor| monitor.is_focused());
         let immediate = engine.handle_keys(&pressed, now, focus_now);
-        let due = engine.poll(now, focus_now, &mut jitter);
+        let due = engine.poll(now, focus_now, jitter.as_mut());
         for actuation in immediate.into_iter().chain(due) {
             match sink.actuate(&actuation) {
                 Ok(()) => {
@@ -315,7 +314,10 @@ fn drive(
                     consecutive_failures += 1;
                     tracing::warn!("actuation failed ({consecutive_failures} in a row): {err}");
                     if consecutive_failures >= MAX_CONSECUTIVE_SINK_FAILURES {
-                        release(&mut engine, &mut sink, true);
+                        // The same release policy as a graceful stop: the
+                        // `release_all_on_stop` opt-out is honored on every
+                        // exit path.
+                        release(&mut engine, &mut sink, release_all_on_stop);
                         bail!("input sink keeps failing; stopping (last error: {err})");
                     }
                 }
@@ -331,6 +333,28 @@ fn drive(
 
     release(&mut engine, &mut sink, release_all_on_stop);
     Ok(reason)
+}
+
+/// The startup banner: version, resolved adapter descriptions, and the
+/// engine's initial state.
+fn banner(
+    settings: &Settings,
+    sink: &dyn InputSink,
+    hotkeys: &dyn HotkeySource,
+    focus: Option<&dyn FocusMonitor>,
+) {
+    info!("### Simple Clicker v{} ###", env!("CARGO_PKG_VERSION"));
+    info!("[!] Sink: {}", sink.describe());
+    info!("[!] Hotkeys: {}", hotkeys.describe());
+    if let Some(monitor) = focus {
+        info!("[!] Focus: {}", monitor.describe());
+    }
+    if let Some(toggle) = settings.engine.toggle_key() {
+        info!("[!] Toggle: [{toggle}]");
+    }
+    info!("[!] Profiles: {}", settings.engine.profile_summary().join(", "));
+    info!("[!] Actions: {}", settings.engine.action_summary().join(", "));
+    info!("[!] {}", settings.engine.describe());
 }
 
 /// Releases the engine's held state through the sink; `include_release_all`
@@ -351,8 +375,8 @@ fn release(engine: &mut Engine, sink: &mut Box<dyn InputSink>, include_release_a
 }
 
 /// Whether the final release-all should reach the device.
-fn release_on_stop(settings: &Settings, backend: SinkBackend) -> bool {
-    backend != SinkBackend::VersaKbm || settings.sink.versa_kbm.release_on_stop
+fn release_on_stop(settings: &SinkSettings, backend: SinkBackend) -> bool {
+    backend != SinkBackend::VersaKbm || settings.versa_kbm.release_on_stop
 }
 
 /// Resolves `auto` into a concrete hotkey backend.
@@ -696,4 +720,250 @@ fn print_keys() {
             .collect::<Vec<_>>()
             .join("  ")
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        cell::RefCell,
+        collections::VecDeque,
+        rc::Rc,
+    };
+
+    use simple_clicker::{
+        config::VersaKbmSection,
+        domain::engine::{
+            Action,
+            Bindings,
+            EngineOptions,
+            Millis,
+            Press,
+            Profile,
+            Step,
+        },
+    };
+
+    use super::*;
+
+    // ------------------------------------------------------------- fakes
+
+    struct FakeClock;
+
+    impl Clock for FakeClock {
+        fn now_ms(&self) -> Millis {
+            0
+        }
+    }
+
+    struct FixedJitter(Millis);
+
+    impl Jitter for FixedJitter {
+        fn sample_ms(&mut self, min_ms: Millis, max_ms: Millis) -> Millis {
+            self.0.clamp(min_ms, max_ms)
+        }
+    }
+
+    /// Queued presses: each poll pops the next batch, then always empty.
+    struct FakeHotkeys {
+        presses: VecDeque<Vec<Key>>,
+    }
+
+    impl HotkeySource for FakeHotkeys {
+        fn poll(&mut self) -> Vec<Key> {
+            self.presses.pop_front().unwrap_or_default()
+        }
+
+        fn describe(&self) -> String {
+            "fake".to_owned()
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum Plan {
+        Ok,
+        TargetGone,
+        Transport,
+    }
+
+    /// Records every actuation; the plan decides each result. After
+    /// `stop_after` actuations the shared stop flag is set, ending the
+    /// loop deterministically.
+    struct FakeSink {
+        plan: Plan,
+        sent: Rc<RefCell<Vec<Actuation>>>,
+        stop: Arc<AtomicBool>,
+        stop_after: usize,
+    }
+
+    impl InputSink for FakeSink {
+        fn actuate(&mut self, actuation: &Actuation) -> Result<(), SinkError> {
+            {
+                let mut sent = self.sent.borrow_mut();
+                sent.push(*actuation);
+                if sent.len() >= self.stop_after {
+                    self.stop.store(true, Ordering::Relaxed);
+                }
+            }
+            match self.plan {
+                Plan::Ok => Ok(()),
+                Plan::TargetGone => Err(SinkError::TargetGone),
+                Plan::Transport => Err(SinkError::Transport("boom".to_owned())),
+            }
+        }
+
+        fn supports(&self, _key: Key) -> bool {
+            true
+        }
+
+        fn describe(&self) -> String {
+            "fake".to_owned()
+        }
+    }
+
+    fn fake_sink(plan: Plan, stop: &Arc<AtomicBool>, stop_after: usize) -> FakeSink {
+        FakeSink {
+            plan,
+            sent: Rc::new(RefCell::new(Vec::new())),
+            stop: Arc::clone(stop),
+            stop_after,
+        }
+    }
+
+    /// A zero-interval, zero-hold tap engine toggled by Numpad4: each loop
+    /// iteration bursts 8 actuations (the burst cap) once toggled on.
+    fn tap_engine() -> Engine {
+        Engine::new(
+            vec![Profile { name: "super".to_owned(), interval_min_ms: 0, interval_max_ms: 0 }],
+            vec![Action { name: "tap".to_owned(), steps: vec![Step::hold(Press::Key(Key::Q), 0)] }],
+            Bindings::new(Some(Key::Numpad4), vec![], vec![]),
+            EngineOptions { added_delay_ms: 0, require_focus: false, global_hotkeys: true },
+        )
+    }
+
+    fn stack(sink: FakeSink) -> DriveStack {
+        DriveStack {
+            hotkeys: Box::new(FakeHotkeys { presses: VecDeque::from(vec![vec![Key::Numpad4]]) }),
+            focus: None,
+            sink: Box::new(sink),
+            engine: tap_engine(),
+            clock: Box::new(FakeClock),
+            jitter: Box::new(FixedJitter(0)),
+        }
+    }
+
+    // ------------------------------------------------------------- tests
+
+    #[test]
+    fn driver_delivers_actuations_until_stopped() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let sink = fake_sink(Plan::Ok, &stop, 4);
+        let sent = Rc::clone(&sink.sent);
+        let result = drive(stack(sink), &stop, false, true);
+        assert!(
+            matches!(&result, Ok(StopReason::Interrupted)),
+            "a working sink must run until stopped: {result:?}"
+        );
+        let sent = sent.borrow();
+        assert_eq!(sent.first(), Some(&Actuation::KeyDown(Key::Q)), "taps must reach the sink");
+        assert!(sent.contains(&Actuation::ReleaseAll), "the stop must release: {sent:?}");
+    }
+
+    #[test]
+    fn driver_survives_target_gone_and_releases_on_stop() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let sink = fake_sink(Plan::TargetGone, &stop, 3);
+        let sent = Rc::clone(&sink.sent);
+        let result = drive(stack(sink), &stop, false, true);
+        assert!(
+            matches!(&result, Ok(StopReason::Interrupted)),
+            "TargetGone must pause, not fail the loop: {result:?}"
+        );
+        let sent = sent.borrow();
+        assert!(sent.contains(&Actuation::ReleaseAll), "the stop must release: {sent:?}");
+        // One 8-actuation burst (the 3rd actuation set the stop flag) plus
+        // the final release-all.
+        assert_eq!(sent.len(), 9, "burst + release-all expected, got {sent:?}");
+    }
+
+    #[test]
+    fn driver_bails_after_ten_consecutive_transport_failures() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let sink = fake_sink(Plan::Transport, &stop, usize::MAX);
+        let sent = Rc::clone(&sink.sent);
+        let result = drive(stack(sink), &stop, false, true);
+        assert!(
+            matches!(&result, Err(err) if err.to_string().contains("input sink keeps failing")),
+            "ten transport failures must stop the loop: {result:?}"
+        );
+        let sent = sent.borrow();
+        assert_eq!(
+            sent.last(),
+            Some(&Actuation::ReleaseAll),
+            "the bail must release before stopping: {sent:?}"
+        );
+        assert_eq!(
+            sent.len(),
+            usize::try_from(MAX_CONSECUTIVE_SINK_FAILURES).unwrap_or(usize::MAX) + 1,
+            "10 failures + the release-all expected, got {sent:?}"
+        );
+    }
+
+    #[test]
+    fn driver_bail_release_honors_the_release_all_opt_out() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let sink = fake_sink(Plan::Transport, &stop, usize::MAX);
+        let sent = Rc::clone(&sink.sent);
+        let result = drive(stack(sink), &stop, false, false);
+        assert!(result.is_err(), "the loop must still bail: {result:?}");
+        let sent = sent.borrow();
+        assert!(
+            !sent.contains(&Actuation::ReleaseAll),
+            "release_all_on_stop = false must suppress the release-all: {sent:?}"
+        );
+    }
+
+    #[test]
+    fn release_on_stop_defaults_true_except_the_versa_kbm_opt_out() {
+        let versa = |release_on_stop: bool| SinkSettings {
+            backend: SinkBackend::Auto,
+            versa_kbm: VersaKbmSection { release_on_stop, ..VersaKbmSection::default() },
+        };
+        assert!(release_on_stop(&versa(true), SinkBackend::VersaKbm));
+        assert!(!release_on_stop(&versa(false), SinkBackend::VersaKbm));
+        assert!(
+            release_on_stop(&versa(false), SinkBackend::Win32),
+            "window messages latch nothing after exit"
+        );
+        assert!(release_on_stop(&versa(false), SinkBackend::Log));
+        assert!(release_on_stop(&versa(false), SinkBackend::Auto));
+    }
+
+    #[cfg(all(windows, feature = "win32"))]
+    #[test]
+    fn needs_window_follows_the_focus_gate_requirements() {
+        use simple_clicker::config::{
+            ClickerSettings,
+            TargetSettings,
+        };
+
+        let settings = |require_focus: bool, global_hotkeys: bool| Settings {
+            target: TargetSettings {
+                process_names: vec![],
+                wait_for_window: true,
+                exit_when_lost: true,
+                require_focus,
+            },
+            clicker: ClickerSettings { global_hotkeys },
+            engine: tap_engine(),
+            sink: SinkSettings {
+                backend: SinkBackend::Auto,
+                versa_kbm: VersaKbmSection::default(),
+            },
+            hotkey_backend: HotkeyBackend::Auto,
+            log_level: "info".to_owned(),
+        };
+        assert!(!needs_window(&settings(false, true)), "pure global hotkeying needs no window");
+        assert!(needs_window(&settings(true, true)), "a focus gate needs one");
+        assert!(needs_window(&settings(false, false)), "focus-gated hotkeys need one");
+    }
 }

@@ -217,9 +217,10 @@ struct Scheduled {
 }
 
 impl Engine {
-    /// Builds an engine over validated config. Empty profile/action lists
-    /// are tolerated (the engine then never fires) so the config layer is
-    /// the single validation point.
+    /// Builds an engine over validated config. Empty profile and action
+    /// lists are tolerated: an empty action list never fires, while an
+    /// empty profile list falls back to a zero interval (the config layer
+    /// is the single validation point and rejects both).
     #[must_use]
     pub fn new(
         profiles: Vec<Profile>,
@@ -852,5 +853,105 @@ mod tests {
         toggle_on(&mut eng, 0);
         assert_eq!(eng.poll(0, Some(true), &mut FakeJitter::fixed(0)), []);
         assert_eq!(eng.poll(100, Some(true), &mut FakeJitter::fixed(0)), []);
+    }
+
+    #[test]
+    fn select_defaults_picks_the_starting_pair() {
+        let mut eng = Engine::new(
+            vec![human_profile(), super_profile()],
+            vec![single_key_action("spell", Key::Q), single_key_action("interact", Key::Numpad0)],
+            Bindings::new(Some(Key::Numpad4), vec![], vec![]),
+            EngineOptions { added_delay_ms: 0, require_focus: false, global_hotkeys: true },
+        );
+        eng.select_defaults(1, 1);
+        toggle_on(&mut eng, 0);
+        // The super profile (index 1) bursts taps of the interact action
+        // (index 1), not the spell action the first slot would give.
+        let out = eng.poll(0, Some(true), &mut FakeJitter::fixed(30));
+        assert_eq!(out.first(), Some(&Actuation::KeyDown(Key::Numpad0)), "got {out:?}");
+    }
+
+    #[test]
+    fn next_wake_prefers_the_earliest_deadline() {
+        let mut eng = engine(
+            vec![human_profile()],
+            vec![Action {
+                name: "hold".to_owned(),
+                steps: vec![Step::hold_range(Press::Key(Key::Q), 40, 40)],
+            }],
+        );
+        toggle_on(&mut eng, 0);
+        // A held key schedules its release at 40 while the repetition's
+        // fire time is still 0: the earlier of the two wins.
+        assert_eq!(
+            eng.poll(0, Some(true), &mut FakeJitter::fixed(40)),
+            [Actuation::KeyDown(Key::Q)]
+        );
+        assert_eq!(eng.next_wake(), Some(0));
+    }
+
+    #[test]
+    fn describe_renders_the_running_state() {
+        let mut eng = engine(vec![human_profile()], vec![single_key_action("spell", Key::Q)]);
+        toggle_on(&mut eng, 0);
+        assert_eq!(eng.poll(0, Some(true), &mut FakeJitter::fixed(30)).len(), 2);
+        assert_eq!(eng.describe(), "clicking human / spell (step 1/1)");
+    }
+
+    #[test]
+    fn selection_hotkeys_ignore_current_and_out_of_range_targets() {
+        let mut eng = Engine::new(
+            vec![human_profile(), super_profile()],
+            vec![single_key_action("spell", Key::Q), single_key_action("interact", Key::Numpad0)],
+            Bindings::new(
+                Some(Key::Numpad4),
+                vec![(Key::Numpad5, 0), (Key::Numpad6, 7)],
+                vec![(Key::Numpad2, 0), (Key::Numpad3, 7)],
+            ),
+            EngineOptions { added_delay_ms: 0, require_focus: false, global_hotkeys: true },
+        );
+        toggle_on(&mut eng, 0);
+        // Numpad5 selects the already-active profile (0); Numpad6/Numpad3
+        // name an index past the end of the lists. Nothing may change.
+        eng.handle_keys(&[Key::Numpad5, Key::Numpad6, Key::Numpad3], 0, Some(true));
+        assert_eq!(
+            eng.poll(0, Some(true), &mut FakeJitter::fixed(30)),
+            [Actuation::KeyDown(Key::Q), Actuation::KeyUp(Key::Q)],
+            "selection no-ops must keep profile 0 / action 0"
+        );
+        assert_eq!(eng.next_wake(), Some(30), "the human profile's gap must survive");
+    }
+
+    #[test]
+    fn global_hotkeys_fire_whatever_the_focus_state() {
+        let mut eng = engine(vec![human_profile()], vec![single_key_action("spell", Key::Q)]);
+        eng.handle_keys(&[Key::Numpad4], 0, Some(false));
+        assert!(eng.is_running(), "global hotkeys must fire while unfocused");
+        eng.handle_keys(&[Key::Numpad4], 0, None);
+        assert!(!eng.is_running(), "global hotkeys must fire while focus is unknown");
+    }
+
+    #[test]
+    fn unknown_focus_blocks_non_global_hotkeys() {
+        let mut eng = Engine::new(
+            vec![human_profile()],
+            vec![single_key_action("spell", Key::Q)],
+            Bindings::new(Some(Key::Numpad4), vec![], vec![]),
+            EngineOptions { added_delay_ms: 0, require_focus: false, global_hotkeys: false },
+        );
+        eng.handle_keys(&[Key::Numpad4], 0, None);
+        assert!(!eng.is_running(), "a non-global toggle needs a confirmed focus");
+    }
+
+    #[test]
+    fn halt_while_a_pause_is_pending_releases_all() {
+        let mut eng = engine(
+            vec![super_profile()],
+            vec![Action { name: "combo".to_owned(), steps: vec![Step::hold(Press::Pause, 50)] }],
+        );
+        toggle_on(&mut eng, 0);
+        assert_eq!(eng.poll(0, Some(true), &mut FakeJitter::fixed(50)), []);
+        // The pending pause has nothing to release; only the release-all.
+        assert_eq!(eng.halt(), vec![Actuation::ReleaseAll]);
     }
 }

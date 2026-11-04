@@ -475,5 +475,275 @@ mod tests {
         assert_eq!(Key::from_name("numpad4"), Some(Key::Numpad4));
         assert_eq!(Key::from_name("NUMPAD4"), Some(Key::Numpad4));
         assert_eq!(Key::from_name(" Esc "), Some(Key::Escape));
+        assert_eq!(MouseButton::from_name("mid"), Some(MouseButton::Middle));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // the exhaustive witness is inherently long
+    fn every_variant_is_listed_in_all() {
+        // The key below names every variant without a wildcard arm: adding
+        // a `Key` variant fails to compile until this test names it, and
+        // the assertion pins it into `ALL` (which `ALL`-iterating tests
+        // cannot check themselves).
+        for key in [
+            Key::A,
+            Key::B,
+            Key::C,
+            Key::D,
+            Key::E,
+            Key::F,
+            Key::G,
+            Key::H,
+            Key::I,
+            Key::J,
+            Key::K,
+            Key::L,
+            Key::M,
+            Key::N,
+            Key::O,
+            Key::P,
+            Key::Q,
+            Key::R,
+            Key::S,
+            Key::T,
+            Key::U,
+            Key::V,
+            Key::W,
+            Key::X,
+            Key::Y,
+            Key::Z,
+            Key::Num0,
+            Key::Num1,
+            Key::Num2,
+            Key::Num3,
+            Key::Num4,
+            Key::Num5,
+            Key::Num6,
+            Key::Num7,
+            Key::Num8,
+            Key::Num9,
+            Key::F1,
+            Key::F2,
+            Key::F3,
+            Key::F4,
+            Key::F5,
+            Key::F6,
+            Key::F7,
+            Key::F8,
+            Key::F9,
+            Key::F10,
+            Key::F11,
+            Key::F12,
+            Key::Numpad0,
+            Key::Numpad1,
+            Key::Numpad2,
+            Key::Numpad3,
+            Key::Numpad4,
+            Key::Numpad5,
+            Key::Numpad6,
+            Key::Numpad7,
+            Key::Numpad8,
+            Key::Numpad9,
+            Key::NumpadAdd,
+            Key::NumpadSubtract,
+            Key::NumpadMultiply,
+            Key::NumpadDivide,
+            Key::NumpadDecimal,
+            Key::NumpadEnter,
+            Key::Space,
+            Key::Tab,
+            Key::Enter,
+            Key::Escape,
+            Key::Backspace,
+            Key::Left,
+            Key::Right,
+            Key::Up,
+            Key::Down,
+            Key::Insert,
+            Key::Delete,
+            Key::Home,
+            Key::End,
+            Key::PageUp,
+            Key::PageDown,
+            Key::LShift,
+            Key::RShift,
+            Key::LCtrl,
+            Key::RCtrl,
+            Key::LAlt,
+            Key::RAlt,
+            Key::Minus,
+            Key::Equals,
+            Key::LBracket,
+            Key::RBracket,
+            Key::Backslash,
+            Key::Semicolon,
+            Key::Apostrophe,
+            Key::Backquote,
+            Key::Comma,
+            Key::Period,
+            Key::Slash,
+        ] {
+            assert!(Key::ALL.contains(&key), "{} is missing from ALL", key.name());
+            assert_eq!(Key::from_name(key.name()), Some(key));
+        }
+        let witness = |key: Key| match key {
+            Key::A
+            | Key::B
+            | Key::C
+            | Key::D
+            | Key::E
+            | Key::F
+            | Key::G
+            | Key::H
+            | Key::I
+            | Key::J
+            | Key::K
+            | Key::L
+            | Key::M
+            | Key::N
+            | Key::O
+            | Key::P
+            | Key::Q
+            | Key::R
+            | Key::S
+            | Key::T
+            | Key::U
+            | Key::V
+            | Key::W
+            | Key::X
+            | Key::Y
+            | Key::Z
+            | Key::Num0
+            | Key::Num1
+            | Key::Num2
+            | Key::Num3
+            | Key::Num4
+            | Key::Num5
+            | Key::Num6
+            | Key::Num7
+            | Key::Num8
+            | Key::Num9
+            | Key::F1
+            | Key::F2
+            | Key::F3
+            | Key::F4
+            | Key::F5
+            | Key::F6
+            | Key::F7
+            | Key::F8
+            | Key::F9
+            | Key::F10
+            | Key::F11
+            | Key::F12
+            | Key::Numpad0
+            | Key::Numpad1
+            | Key::Numpad2
+            | Key::Numpad3
+            | Key::Numpad4
+            | Key::Numpad5
+            | Key::Numpad6
+            | Key::Numpad7
+            | Key::Numpad8
+            | Key::Numpad9
+            | Key::NumpadAdd
+            | Key::NumpadSubtract
+            | Key::NumpadMultiply
+            | Key::NumpadDivide
+            | Key::NumpadDecimal
+            | Key::NumpadEnter
+            | Key::Space
+            | Key::Tab
+            | Key::Enter
+            | Key::Escape
+            | Key::Backspace
+            | Key::Left
+            | Key::Right
+            | Key::Up
+            | Key::Down
+            | Key::Insert
+            | Key::Delete
+            | Key::Home
+            | Key::End
+            | Key::PageUp
+            | Key::PageDown
+            | Key::LShift
+            | Key::RShift
+            | Key::LCtrl
+            | Key::RCtrl
+            | Key::LAlt
+            | Key::RAlt
+            | Key::Minus
+            | Key::Equals
+            | Key::LBracket
+            | Key::RBracket
+            | Key::Backslash
+            | Key::Semicolon
+            | Key::Apostrophe
+            | Key::Backquote
+            | Key::Comma
+            | Key::Period
+            | Key::Slash => {}
+        };
+        for &key in Key::ALL {
+            witness(key);
+        }
+    }
+
+    #[test]
+    fn the_full_alias_table_parses() {
+        let aliases: &[(&str, Key)] = &[
+            ("esc", Key::Escape),
+            ("del", Key::Delete),
+            ("ins", Key::Insert),
+            ("pgup", Key::PageUp),
+            ("pageup", Key::PageUp),
+            ("pgdn", Key::PageDown),
+            ("pgdown", Key::PageDown),
+            ("pagedown", Key::PageDown),
+            ("return", Key::Enter),
+            ("leftarrow", Key::Left),
+            ("arrowleft", Key::Left),
+            ("rightarrow", Key::Right),
+            ("arrowright", Key::Right),
+            ("uparrow", Key::Up),
+            ("arrowup", Key::Up),
+            ("downarrow", Key::Down),
+            ("arrowdown", Key::Down),
+            ("shift", Key::LShift),
+            ("lcontrol", Key::LCtrl),
+            ("control", Key::LCtrl),
+            ("ctrl", Key::LCtrl),
+            ("lmenu", Key::LAlt),
+            ("alt", Key::LAlt),
+            ("rcontrol", Key::RCtrl),
+            ("rmenu", Key::RAlt),
+            ("plus", Key::NumpadAdd),
+            ("add", Key::NumpadAdd),
+            ("subtract", Key::NumpadSubtract),
+            ("multiply", Key::NumpadMultiply),
+            ("divide", Key::NumpadDivide),
+            ("decimal", Key::NumpadDecimal),
+            ("grave", Key::Backquote),
+            ("oem3", Key::Backquote),
+            ("oemplus", Key::Equals),
+            ("equal", Key::Equals),
+            ("oemminus", Key::Minus),
+            ("dash", Key::Minus),
+            ("oemcomma", Key::Comma),
+            ("oemperiod", Key::Period),
+            ("dot", Key::Period),
+            ("oem1", Key::Semicolon),
+            ("oem7", Key::Apostrophe),
+            ("quote", Key::Apostrophe),
+            ("oem2", Key::Slash),
+            ("oem4", Key::LBracket),
+            ("bracketleft", Key::LBracket),
+            ("oem6", Key::RBracket),
+            ("bracketright", Key::RBracket),
+            ("oem5", Key::Backslash),
+        ];
+        for &(alias, expected) in aliases {
+            assert_eq!(Key::from_name(alias), Some(expected), "alias {alias} maps wrong");
+        }
     }
 }
