@@ -303,18 +303,20 @@ const fn hid_usage(key: Key) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use crate::domain::key::Key;
-    use crate::ports::driven::SinkError;
-    use vkbm_proto::keyboard::KeyboardState;
     use vkbm_proto::{
         Command,
         ErrorCode,
         Reply,
+        keyboard::KeyboardState,
     };
 
     use super::{
         hid_usage,
         translate_reply,
+    };
+    use crate::{
+        domain::key::Key,
+        ports::driven::SinkError,
     };
 
     #[test]
