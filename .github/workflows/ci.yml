@@ -14,8 +14,6 @@ name: CI
 # `main`, pinned by Cargo.lock); cargo fetches it on every
 # --all-features build, no extra checkout step needed.
 
-name: CI
-
 on:
   push:
     branches: [main]
