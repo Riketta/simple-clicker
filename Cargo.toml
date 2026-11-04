@@ -55,7 +55,7 @@ windows-sys = { version = "0.59", optional = true, features = [
 ] }
 
 [features]
-default = ["win32"]
+default = ["win32", "versa-kbm"]
 # Win32 window-message input sink, focus monitor, and hotkey polling
 # (Windows only; the dependency is target-gated so the feature is a no-op
 # elsewhere).

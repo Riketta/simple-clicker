@@ -29,7 +29,7 @@ adapter selection) lives in `config.toml`.
 | Port | Adapter | Platforms | Notes |
 |---|---|---|---|
 | Input sink | `win32` (`--features win32`, default on Windows) | Windows | Keyboard via `WM_KEYDOWN`/`WM_KEYUP` messages into the target window — works while the game is in the background. Mouse clicks are global `SendInput` (the real cursor). |
-| Input sink | `versa-kbm` (`--features versa-kbm`) | Windows, Linux, macOS | Actuates through the [versa-kbm](https://github.com/Riketta/versa-kbm) RP2040 HID device: the inputs land in whatever window is focused on the machine the device is plugged into. Input goes to the *focused* window. |
+| Input sink | `versa-kbm` (`--features versa-kbm`, default) | Windows, Linux, macOS | Actuates through the [versa-kbm](https://github.com/Riketta/versa-kbm) RP2040 HID device: the inputs land in whatever window is focused on the machine the device is plugged into. Input goes to the *focused* window. |
 | Input sink | `log` (always built) | all | Dry-run: logs actuations, touches nothing (`--dry-run`). |
 | Hotkeys | `win32` (Windows) | Windows | `GetAsyncKeyState` polling — global, so hotkeys work while the game is focused or not. |
 | Hotkeys | `rdev` (`--features hotkeys-rdev`) | Linux/X11, macOS, Windows | Global event listener. macOS needs Accessibility permissions; Wayland is not supported. |
@@ -69,8 +69,8 @@ cargo run -- --sink versa-kbm --hotkeys rdev
 
 ```sh
 cargo build --release --all-features                       # everything
-cargo build --release --features versa-kbm,hotkeys-rdev    # no Win32
-cargo build --release                                      # Win32 only
+cargo build --release --no-default-features --features versa-kbm,hotkeys-rdev    # no Win32
+cargo build --release                                      # Win32 + versa-kbm
 ```
 
 Key names follow `config.example.toml`; run `--list-keys` for the full

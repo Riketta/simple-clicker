@@ -74,8 +74,8 @@ jobs:
       - name: Tests (no default features)
         run: cargo test --no-default-features --locked
 
-      # Runs the feature-gated adapter tests (versa-kbm reply mapping,
-      # rdev key table) that the default-feature runs never compile.
+      # The all-features run compiles the rdev hotkey tests - the only
+      # adapter outside the default feature set (versa-kbm is default).
       - name: Tests (all features)
         run: cargo test --all-features --locked
 
