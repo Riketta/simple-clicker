@@ -8,9 +8,13 @@
 
 use std::{
     collections::HashSet,
-    sync::mpsc::{
-        Receiver,
-        sync_channel,
+    sync::{
+        Arc,
+        Mutex,
+        mpsc::{
+            Receiver,
+            sync_channel,
+        },
     },
 };
 
@@ -26,10 +30,13 @@ use crate::{
 
 /// The `rdev` hotkey source: a background listener thread forwards
 /// key-press events over a bounded channel; [`HotkeySource::poll`] drains
-/// it.
+/// it. The watch set lives behind shared state so a config reload can
+/// retarget it without restarting the listener thread (which `rdev`
+/// cannot stop cleanly).
 #[derive(Debug)]
 pub struct RdevHotkeys {
     rx: Receiver<Key>,
+    watch: Arc<Mutex<HashSet<Key>>>,
 }
 
 impl RdevHotkeys {
@@ -40,14 +47,15 @@ impl RdevHotkeys {
     /// platform hook cannot be installed.
     pub fn new(watched_keys: &[Key]) -> Result<Self, HotkeyError> {
         let (tx, rx) = sync_channel(256);
-        let watch: HashSet<Key> = watched_keys.iter().copied().collect();
+        let watch = Arc::new(Mutex::new(watched_keys.iter().copied().collect::<HashSet<Key>>()));
+        let thread_watch = Arc::clone(&watch);
         std::thread::Builder::new()
             .name("rdev-hotkeys".to_owned())
             .spawn(move || {
                 let result = rdev::listen(move |event: rdev::Event| {
                     if let rdev::EventType::KeyPress(key) = event.event_type
                         && let Some(domain_key) = map_key(key)
-                        && watch.contains(&domain_key)
+                        && thread_watch.lock().is_ok_and(|watch| watch.contains(&domain_key))
                     {
                         // Drop instead of blocking the listen thread when
                         // a burst fills the channel.
@@ -59,7 +67,7 @@ impl RdevHotkeys {
                 }
             })
             .map_err(|err| HotkeyError::Start(err.to_string()))?;
-        Ok(Self { rx })
+        Ok(Self { rx, watch })
     }
 }
 
@@ -74,6 +82,14 @@ impl HotkeySource for RdevHotkeys {
 
     fn describe(&self) -> String {
         "rdev (global event listener)".to_owned()
+    }
+
+    fn set_watched(&mut self, watched_keys: &[Key]) {
+        if let Ok(mut watch) = self.watch.lock() {
+            *watch = watched_keys.iter().copied().collect();
+        } else {
+            warn!("rdev watch-set update skipped: listener state is poisoned");
+        }
     }
 }
 

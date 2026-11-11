@@ -30,13 +30,13 @@ impl Win32Hotkeys {
     /// Watches exactly the configured hotkeys; other keys are ignored.
     #[must_use]
     pub fn new(watched_keys: &[Key]) -> Self {
-        Self {
-            watched: watched_keys
-                .iter()
-                .map(|&key| Watched { key, vk: vk_code(key), was_down: false })
-                .collect(),
-        }
+        Self { watched: build_watched(watched_keys) }
     }
+}
+
+/// Maps watch keys onto VK codes with a fresh edge-detector state.
+fn build_watched(watched_keys: &[Key]) -> Vec<Watched> {
+    watched_keys.iter().map(|&key| Watched { key, vk: vk_code(key), was_down: false }).collect()
 }
 
 impl HotkeySource for Win32Hotkeys {
@@ -59,6 +59,10 @@ impl HotkeySource for Win32Hotkeys {
 
     fn describe(&self) -> String {
         format!("win32 (GetAsyncKeyState, global; {} watched keys)", self.watched.len())
+    }
+
+    fn set_watched(&mut self, watched_keys: &[Key]) {
+        self.watched = build_watched(watched_keys);
     }
 }
 
@@ -108,5 +112,13 @@ mod tests {
         assert!(!edge_pressed(&mut was_down, true), "still held");
         assert!(!edge_pressed(&mut was_down, false), "release");
         assert!(edge_pressed(&mut was_down, true), "second press");
+    }
+
+    #[test]
+    fn set_watched_replaces_the_watch_list() {
+        let mut hotkeys = Win32Hotkeys::new(&[Key::Numpad4]);
+        assert!(hotkeys.describe().contains("1 watched keys"));
+        hotkeys.set_watched(&[Key::Numpad4, Key::Numpad5, Key::Numpad6]);
+        assert!(hotkeys.describe().contains("3 watched keys"));
     }
 }

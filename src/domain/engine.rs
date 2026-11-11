@@ -404,6 +404,55 @@ impl Engine {
         self.running
     }
 
+    /// Restores the running flag after a config reload swapped the engine:
+    /// turning it on arms the next repetition at `now` exactly like a
+    /// toggle press; turning it off disarms without emitting actuations
+    /// (the caller releases the old engine's held inputs itself).
+    pub fn set_running(&mut self, running: bool, now: Millis) {
+        if running == self.running {
+            return;
+        }
+        self.running = running;
+        if running {
+            self.next_fire = Some(now);
+            self.step_idx = 0;
+        } else {
+            self.next_fire = None;
+            self.pending = None;
+        }
+    }
+
+    /// Names of the currently selected profile and action ("?" when the
+    /// selection is out of range), so a config reload can preserve the
+    /// user's selection across the engine swap.
+    #[must_use]
+    pub fn selected_names(&self) -> (&str, &str) {
+        (self.profile_name(), self.action_name())
+    }
+
+    /// Selects a profile and an action by name (a config reload
+    /// preserving the selection). Unknown names are ignored and the
+    /// config-resolved defaults stand; returns whether both were found.
+    pub fn select_named(&mut self, profile: &str, action: &str) -> bool {
+        let profile = self.profiles.iter().position(|p| p.name == profile);
+        let action = self.actions.iter().position(|a| a.name == action);
+        if let Some(idx) = profile {
+            self.profile_idx = idx;
+        }
+        if let Some(idx) = action {
+            self.action_idx = idx;
+        }
+        profile.is_some() && action.is_some()
+    }
+
+    /// Restores the focus/hotkey gating flags after a config reload: the
+    /// reload applies engine content live but withholds gating changes
+    /// until restart, so the swapped engine keeps the applied ones.
+    pub fn set_gating(&mut self, require_focus: bool, global_hotkeys: bool) {
+        self.options.require_focus = require_focus;
+        self.options.global_hotkeys = global_hotkeys;
+    }
+
     /// The toggle hotkey, for the startup banner.
     #[must_use]
     pub fn toggle_key(&self) -> Option<Key> {
@@ -953,5 +1002,52 @@ mod tests {
         assert_eq!(eng.poll(0, Some(true), &mut FakeJitter::fixed(50)), []);
         // The pending pause has nothing to release; only the release-all.
         assert_eq!(eng.halt(), vec![Actuation::ReleaseAll]);
+    }
+
+    #[test]
+    fn set_running_arms_and_disarms_like_a_toggle() {
+        let mut eng = engine(vec![super_profile()], vec![single_key_action("tap", Key::Q)]);
+        eng.set_running(true, 500);
+        assert!(eng.is_running());
+        assert_eq!(eng.next_wake(), Some(500), "arming must schedule from now");
+        let mut jitter = FakeJitter::fixed(0);
+        assert!(!eng.poll(500, Some(true), &mut jitter).is_empty(), "an armed engine must actuate");
+        eng.set_running(false, 600);
+        assert!(!eng.is_running());
+        assert_eq!(eng.next_wake(), None, "disarming must clear the schedule");
+    }
+
+    #[test]
+    fn set_running_ignores_a_redundant_flip() {
+        let mut eng = engine(vec![super_profile()], vec![single_key_action("tap", Key::Q)]);
+        eng.set_running(false, 0);
+        assert_eq!(eng.next_wake(), None, "a no-op flip must arm nothing");
+    }
+
+    #[test]
+    fn select_named_preserves_selection_and_falls_back() {
+        let mut eng = engine(
+            vec![super_profile(), human_profile()],
+            vec![single_key_action("tap", Key::Q), single_key_action("tag", Key::F1)],
+        );
+        assert!(eng.select_named("human", "tag"), "existing names must be selected");
+        assert_eq!(eng.selected_names(), ("human", "tag"));
+        assert!(!eng.select_named("ghost", "missing"), "unknown names must not select");
+        assert_eq!(eng.selected_names(), ("human", "tag"), "the previous selection must stand");
+    }
+
+    #[test]
+    fn set_gating_swaps_the_hotkey_focus_rule() {
+        let mut eng = Engine::new(
+            vec![super_profile()],
+            vec![single_key_action("tap", Key::Q)],
+            Bindings::new(Some(Key::Numpad4), vec![], vec![]),
+            EngineOptions { added_delay_ms: 0, require_focus: false, global_hotkeys: false },
+        );
+        eng.handle_keys(&[Key::Numpad4], 0, None);
+        assert!(!eng.is_running(), "non-global hotkeys need a confirmed focus");
+        eng.set_gating(false, true);
+        eng.handle_keys(&[Key::Numpad4], 0, None);
+        assert!(eng.is_running(), "global hotkeys must toggle without focus");
     }
 }

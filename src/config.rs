@@ -58,7 +58,7 @@ pub enum ConfigError {
 // ---------------------------------------------------------------- schema
 
 /// Bounds in milliseconds.
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RangeMs {
     /// Inclusive minimum, in milliseconds.
@@ -174,7 +174,7 @@ impl Default for ClickerSection {
 }
 
 /// `[sink.versa-kbm]`: device connection settings.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct VersaKbmSection {
     /// USB vendor id.
@@ -340,7 +340,7 @@ impl HotkeyBackend {
 }
 
 /// Resolved `[target]` settings.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TargetSettings {
     /// Process names to look for.
     pub process_names: Vec<String>,
@@ -353,14 +353,14 @@ pub struct TargetSettings {
 }
 
 /// Resolved `[clicker]` settings that are not engine state.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ClickerSettings {
     /// Hotkeys work even when the target is not focused.
     pub global_hotkeys: bool,
 }
 
 /// Resolved `[sink]` settings.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SinkSettings {
     /// Which sink backend to build.
     pub backend: SinkBackend,

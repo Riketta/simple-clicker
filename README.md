@@ -80,6 +80,26 @@ required) — a repetition walks the steps in order, then waits the profile's
 interval (jitter-sampled plus `clicker.added_delay_ms`, the old
 `--addeddelay=` argument).
 
+## Hot reload
+
+While running, the config file is hash-checked about once a second and a
+changed file applies live — no restart:
+
+- **Applies live:** profiles, actions, steps, all timing (`interval_ms`,
+  `hold_ms`, `clicker.added_delay_ms`), hotkey bindings (toggle and select
+  keys), `default_profile`/`default_action`, and the `[logging]` level
+  (unless `RUST_LOG` is set, which keeps winning).
+- **Needs a restart** (the change warns in the log): everything that
+  rewires adapters — `[target]` (process names, focus/exit gating),
+  `[sink]` (backend, versa-kbm device settings), `hotkeys.backend`, and
+  `clicker.global_hotkeys`.
+- The swap releases all held inputs first, keeps the current toggle state,
+  and keeps your selected profile/action by name (falling back to the
+  configured defaults when a name disappeared).
+- A file that fails to parse, or that names keys the active sink cannot
+  actuate, is rejected wholesale: the running configuration stands, and
+  the next save retries.
+
 ### The original tagging macro still works
 
 ```
@@ -136,7 +156,6 @@ Linux build dependencies for the adapters: `libudev-dev` (hidapi),
   versa-kbm sink there).
 - Absolute-positioned message-based mouse clicks for the win32 sink
   (background clicks at client coordinates).
-- A sequence editor / profile hot-reload.
 
 ## Origin
 

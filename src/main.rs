@@ -48,15 +48,18 @@ use simple_clicker::{
         },
     },
     config::{
+        ClickerSettings,
         HotkeyBackend,
         Settings,
         SinkBackend,
         SinkSettings,
+        TargetSettings,
     },
     domain::{
         engine::{
             Actuation,
             Engine,
+            Millis,
         },
         key::Key,
     },
@@ -70,9 +73,15 @@ use simple_clicker::{
         },
         driving::HotkeySource,
     },
+    reload::ConfigWatcher,
 };
 use tracing::info;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{
+    EnvFilter,
+    layer::SubscriberExt,
+    reload,
+    util::SubscriberInitExt,
+};
 
 #[cfg(not(all(windows, feature = "win32")))]
 /// Placeholder so the shared builder signatures compile on hosts without
@@ -144,9 +153,7 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
     let settings = simple_clicker::config::load(&cli.config)
         .with_context(|| format!("could not load {}", cli.config.display()))?;
 
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&settings.log_level));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    let (set_filter, filter_from_env) = init_tracing(&settings.log_level);
 
     let sink_backend = match cli.sink.as_deref() {
         Some(raw) => SinkBackend::parse(raw).ok_or_else(|| {
@@ -225,6 +232,13 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
     }
 
     let release_all = release_on_stop(&settings.sink, sink_backend);
+    let mut reload_state = ReloadState {
+        watcher: ConfigWatcher::new(&cli.config),
+        set_filter,
+        filter_from_env,
+        applied: AppliedConfig::from(&settings),
+    };
+    info!("[!] Config: {} (hot reload: checked every 1s)", cli.config.display());
     let reason = drive(
         DriveStack {
             hotkeys,
@@ -237,11 +251,28 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
         &stop,
         settings.target.exit_when_lost,
         release_all,
+        Some(&mut reload_state),
     )?;
     Ok(match reason {
         StopReason::TargetLost => ExitCode::SUCCESS,
         StopReason::Interrupted => ExitCode::from(130),
     })
+}
+
+/// Initializes tracing: the env-overridden filter behind a reload
+/// handle, so a config reload can swap it live. Returns the swap closure
+/// and whether `RUST_LOG` fixed the filter (config reloads then leave it
+/// alone).
+fn init_tracing(default_level: &str) -> (Box<dyn Fn(EnvFilter) -> bool>, bool) {
+    let env_filter = EnvFilter::try_from_default_env();
+    let filter_from_env = env_filter.is_ok();
+    let filter = env_filter.unwrap_or_else(|_| EnvFilter::new(default_level));
+    let (filter_layer, filter_handle) = reload::Layer::new(filter);
+    tracing_subscriber::registry().with(tracing_subscriber::fmt::layer()).with(filter_layer).init();
+    if filter_from_env {
+        info!("RUST_LOG is set; config [logging] level changes are ignored");
+    }
+    (Box::new(move |filter: EnvFilter| filter_handle.reload(filter).is_ok()), filter_from_env)
 }
 
 /// Everything the driver loop needs, wired by the composition root.
@@ -264,13 +295,51 @@ enum StopReason {
     Interrupted,
 }
 
+/// The config values the reload path diffs against: everything except
+/// the engine (swapped wholesale) and the log filter.
+#[derive(Clone)]
+struct AppliedConfig {
+    target: TargetSettings,
+    clicker: ClickerSettings,
+    sink: SinkSettings,
+    hotkey_backend: HotkeyBackend,
+    log_level: String,
+}
+
+impl From<&Settings> for AppliedConfig {
+    fn from(settings: &Settings) -> Self {
+        Self {
+            target: settings.target.clone(),
+            clicker: settings.clicker,
+            sink: settings.sink.clone(),
+            hotkey_backend: settings.hotkey_backend,
+            log_level: settings.log_level.clone(),
+        }
+    }
+}
+
+/// Everything the hot-reload path keeps between checks: the file watcher,
+/// the log-filter swap closure, and the last applied config snapshot.
+struct ReloadState {
+    watcher: ConfigWatcher,
+    /// Swaps the active log filter; returns whether it took. A closure so
+    /// the generic `reload::Handle` type (parameterized by the whole
+    /// layer stack) stays an implementation detail of `run`.
+    set_filter: Box<dyn Fn(EnvFilter) -> bool>,
+    filter_from_env: bool,
+    applied: AppliedConfig,
+}
+
 /// The driver loop: poll hotkeys, advance the engine, deliver actuations,
 /// sleep until the next interesting moment. Releases everything on exit.
+/// With a [`ReloadState`], also hash-checks the config file and applies
+/// changes live ([`apply_reload`]).
 fn drive(
     stack: DriveStack,
     stop: &AtomicBool,
     exit_when_lost: bool,
     release_all_on_stop: bool,
+    mut reload: Option<&mut ReloadState>,
 ) -> anyhow::Result<StopReason> {
     let DriveStack { mut hotkeys, mut focus, mut sink, mut engine, clock, mut jitter } = stack;
     let mut consecutive_failures = 0u32;
@@ -287,6 +356,11 @@ fn drive(
         }
 
         let now = clock.now_ms();
+        if let Some(state) = reload.as_deref_mut()
+            && state.watcher.changed(now)
+        {
+            apply_reload(state, hotkeys.as_mut(), &mut engine, sink.as_mut(), now);
+        }
         let pressed = hotkeys.poll();
         let focus_now = focus.as_mut().and_then(|monitor| monitor.is_focused());
         let immediate = engine.handle_keys(&pressed, now, focus_now);
@@ -317,7 +391,7 @@ fn drive(
                         // The same release policy as a graceful stop: the
                         // `release_all_on_stop` opt-out is honored on every
                         // exit path.
-                        release(&mut engine, &mut sink, release_all_on_stop);
+                        release(&mut engine, sink.as_mut(), release_all_on_stop);
                         bail!("input sink keeps failing; stopping (last error: {err})");
                     }
                 }
@@ -331,8 +405,107 @@ fn drive(
         sleep(Duration::from_millis(sleep_ms));
     };
 
-    release(&mut engine, &mut sink, release_all_on_stop);
+    release(&mut engine, sink.as_mut(), release_all_on_stop);
     Ok(reason)
+}
+
+/// Applies a changed config file live: releases held inputs, swaps the
+/// engine (preserving the toggle state and the selected profile/action),
+/// retargets the hotkey watch set, and swaps the log filter. Adapter
+/// wiring (sink/hotkeys backend, target discovery, focus gating) cannot
+/// change mid-run: those changes warn and wait for a restart. A file that
+/// fails to load, or that names keys the current sink cannot actuate, is
+/// rejected wholesale — the running configuration stands.
+fn apply_reload(
+    state: &mut ReloadState,
+    hotkeys: &mut dyn HotkeySource,
+    engine: &mut Engine,
+    sink: &mut dyn InputSink,
+    now: Millis,
+) {
+    let settings = match simple_clicker::config::load(state.watcher.path()) {
+        Ok(settings) => settings,
+        Err(err) => {
+            tracing::warn!("config reload rejected, keeping the current configuration: {err}");
+            return;
+        }
+    };
+    // The startup key-support check, as a gate: a config the current
+    // adapters cannot honor must not half-apply.
+    let mut unsupported = settings
+        .engine
+        .configured_keys()
+        .into_iter()
+        .filter(|key| !sink.supports(*key))
+        .map(|key| key.name().to_owned())
+        .collect::<Vec<_>>();
+    unsupported.sort_unstable();
+    unsupported.dedup();
+    if !unsupported.is_empty() {
+        tracing::warn!(
+            "config reload rejected, keeping the current configuration: \
+             the sink does not support these keys: {}",
+            unsupported.join(", ")
+        );
+        return;
+    }
+
+    let fresh = AppliedConfig::from(&settings);
+    let previous = state.applied.clone();
+    let mut restart_required = Vec::new();
+    if previous.target != fresh.target {
+        restart_required.push("target.* (process names, window/focus gating)");
+    }
+    if previous.sink != fresh.sink {
+        restart_required.push("sink.* (backend, versa-kbm device settings)");
+    }
+    if previous.hotkey_backend != fresh.hotkey_backend {
+        restart_required.push("hotkeys.backend");
+    }
+    if previous.clicker != fresh.clicker {
+        restart_required.push("clicker.global_hotkeys");
+    }
+    if !restart_required.is_empty() {
+        tracing::warn!(
+            "config reloaded, but restarting is required to apply: {}",
+            restart_required.join(", ")
+        );
+    }
+
+    // Preserve what must survive the swap before mutating anything.
+    let (profile, action) = engine.selected_names();
+    let profile = profile.to_owned();
+    let action = action.to_owned();
+    let running = engine.is_running();
+
+    // Release the old engine's held inputs before the swap: the fresh
+    // engine does not know about them, and a latched key must not outlive
+    // its config. Always release-all here — the versa-kbm stop-release
+    // opt-out covers stopping, not a config swap.
+    release(engine, sink, true);
+
+    let mut swapped = settings.engine;
+    swapped.select_named(&profile, &action);
+    // Gating flags are restart-tier: the swapped engine keeps the
+    // previously applied ones (flipping require_focus live could stop
+    // actuation entirely when no focus monitor exists).
+    swapped.set_gating(previous.target.require_focus, previous.clicker.global_hotkeys);
+    swapped.set_running(running, now);
+    *engine = swapped;
+
+    let mut watch = engine.hotkeys();
+    watch.sort_unstable();
+    watch.dedup();
+    hotkeys.set_watched(&watch);
+
+    if !state.filter_from_env && fresh.log_level != previous.log_level {
+        let level = fresh.log_level.clone();
+        if (state.set_filter)(EnvFilter::new(&level)) {
+            info!("log filter reloaded: '{level}'");
+        }
+    }
+    info!("config reloaded: {}", engine.describe());
+    state.applied = fresh;
 }
 
 /// The startup banner: version, resolved adapter descriptions, and the
@@ -360,7 +533,7 @@ fn banner(
 /// Releases the engine's held state through the sink; `include_release_all`
 /// controls whether the final release-all is sent (off when the user asked
 /// the versa-kbm device to keep its state).
-fn release(engine: &mut Engine, sink: &mut Box<dyn InputSink>, include_release_all: bool) {
+fn release(engine: &mut Engine, sink: &mut dyn InputSink, include_release_all: bool) {
     for actuation in engine.halt() {
         if actuation == Actuation::ReleaseAll && !include_release_all {
             continue;
@@ -725,8 +898,12 @@ fn print_keys() {
 #[cfg(test)]
 mod tests {
     use std::{
-        cell::RefCell,
+        cell::{
+            Cell,
+            RefCell,
+        },
         collections::VecDeque,
+        path::Path,
         rc::Rc,
     };
 
@@ -858,7 +1035,7 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let sink = fake_sink(Plan::Ok, &stop, 4);
         let sent = Rc::clone(&sink.sent);
-        let result = drive(stack(sink), &stop, false, true);
+        let result = drive(stack(sink), &stop, false, true, None);
         assert!(
             matches!(&result, Ok(StopReason::Interrupted)),
             "a working sink must run until stopped: {result:?}"
@@ -873,7 +1050,7 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let sink = fake_sink(Plan::TargetGone, &stop, 3);
         let sent = Rc::clone(&sink.sent);
-        let result = drive(stack(sink), &stop, false, true);
+        let result = drive(stack(sink), &stop, false, true, None);
         assert!(
             matches!(&result, Ok(StopReason::Interrupted)),
             "TargetGone must pause, not fail the loop: {result:?}"
@@ -890,7 +1067,7 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let sink = fake_sink(Plan::Transport, &stop, usize::MAX);
         let sent = Rc::clone(&sink.sent);
-        let result = drive(stack(sink), &stop, false, true);
+        let result = drive(stack(sink), &stop, false, true, None);
         assert!(
             matches!(&result, Err(err) if err.to_string().contains("input sink keeps failing")),
             "ten transport failures must stop the loop: {result:?}"
@@ -913,7 +1090,7 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let sink = fake_sink(Plan::Transport, &stop, usize::MAX);
         let sent = Rc::clone(&sink.sent);
-        let result = drive(stack(sink), &stop, false, false);
+        let result = drive(stack(sink), &stop, false, false, None);
         assert!(result.is_err(), "the loop must still bail: {result:?}");
         let sent = sent.borrow();
         assert!(
@@ -965,5 +1142,310 @@ mod tests {
         assert!(!needs_window(&settings(false, true)), "pure global hotkeying needs no window");
         assert!(needs_window(&settings(true, true)), "a focus gate needs one");
         assert!(needs_window(&settings(false, false)), "focus-gated hotkeys need one");
+    }
+
+    // ---------------------------------------------------- reload fixtures
+
+    /// A clock that advances 400 ms on every read, so the reload watcher's
+    /// one-second cadence fires every few loop iterations.
+    struct AdvancingClock(Cell<Millis>);
+
+    impl Clock for AdvancingClock {
+        fn now_ms(&self) -> Millis {
+            self.0.set(self.0.get() + 400);
+            self.0.get()
+        }
+    }
+
+    /// Queued presses; once drained, writes the new config file once and
+    /// reports nothing.
+    struct HotkeysThatRewrite {
+        presses: VecDeque<Vec<Key>>,
+        rewrite: Option<(PathBuf, String)>,
+    }
+
+    impl HotkeySource for HotkeysThatRewrite {
+        fn poll(&mut self) -> Vec<Key> {
+            if let Some(presses) = self.presses.pop_front() {
+                return presses;
+            }
+            if let Some((path, content)) = self.rewrite.take() {
+                let _ = std::fs::write(&path, content);
+            }
+            Vec::new()
+        }
+
+        fn describe(&self) -> String {
+            "rewrite".to_owned()
+        }
+    }
+
+    /// Records actuations; stops the loop once the stop key was actuated
+    /// often enough.
+    struct ReloadSink {
+        sent: Rc<RefCell<Vec<Actuation>>>,
+        stop: Arc<AtomicBool>,
+        stop_key: Key,
+        stop_after: usize,
+    }
+
+    impl InputSink for ReloadSink {
+        fn actuate(&mut self, actuation: &Actuation) -> Result<(), SinkError> {
+            let hits = {
+                let mut sent = self.sent.borrow_mut();
+                sent.push(*actuation);
+                sent.iter()
+                    .filter(|act| {
+                        matches!(act, Actuation::KeyDown(k) | Actuation::KeyUp(k) if *k == self.stop_key)
+                    })
+                    .count()
+            };
+            if hits >= self.stop_after {
+                self.stop.store(true, Ordering::Relaxed);
+            }
+            Ok(())
+        }
+
+        fn supports(&self, _key: Key) -> bool {
+            true
+        }
+
+        fn describe(&self) -> String {
+            "reload".to_owned()
+        }
+    }
+
+    /// Accepts only Q; every other key is unsupported.
+    struct PickySink {
+        sent: Rc<RefCell<Vec<Actuation>>>,
+    }
+
+    impl InputSink for PickySink {
+        fn actuate(&mut self, actuation: &Actuation) -> Result<(), SinkError> {
+            self.sent.borrow_mut().push(*actuation);
+            Ok(())
+        }
+
+        fn supports(&self, key: Key) -> bool {
+            key == Key::Q
+        }
+
+        fn describe(&self) -> String {
+            "picky".to_owned()
+        }
+    }
+
+    /// Minimal valid configs: v1 spams Q, v2 spams E, v4 additionally
+    /// moves a restart-tier field.
+    const RELOAD_V1: &str = "[target]\nrequire_focus = false\n\n[clicker]\ntoggle_key = \"Numpad4\"\n\n[[profile]]\nname = \"p\"\ninterval_ms = { min = 0, max = 0 }\n\n[[action]]\nname = \"a\"\nsteps = [{ key = \"Q\" }]\n";
+    const RELOAD_V2: &str = "[target]\nrequire_focus = false\n\n[clicker]\ntoggle_key = \"Numpad4\"\n\n[[profile]]\nname = \"p\"\ninterval_ms = { min = 0, max = 0 }\n\n[[action]]\nname = \"a\"\nsteps = [{ key = \"E\" }]\n";
+    const RELOAD_V4: &str = "[target]\nrequire_focus = false\nprocess_names = [\"Wow\"]\n\n[clicker]\ntoggle_key = \"Numpad4\"\n\n[[profile]]\nname = \"p\"\ninterval_ms = { min = 0, max = 0 }\n\n[[action]]\nname = \"a\"\nsteps = [{ key = \"E\" }]\n";
+    const RELOAD_BROKEN: &str = "not valid toml {{{";
+
+    /// Unique temp config path per test tag; a write that cannot happen
+    /// silently skips the test (temp-dir problems are not the code's
+    /// fault), mirroring the config-module tests.
+    fn reload_temp_path(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("simple-clicker-main-{tag}-{}.toml", std::process::id()))
+    }
+
+    fn try_write(path: &Path, content: &str) -> bool {
+        std::fs::write(path, content).is_ok()
+    }
+
+    /// A `ReloadState` with a standalone (never-installed) filter handle;
+    /// `filter_from_env` freezes filter swaps like a real `RUST_LOG` run.
+    fn reload_state(path: &Path, settings: &Settings) -> ReloadState {
+        let (_layer, handle) =
+            reload::Layer::<EnvFilter, tracing_subscriber::Registry>::new(EnvFilter::new("info"));
+        ReloadState {
+            watcher: ConfigWatcher::new(path),
+            set_filter: Box::new(move |filter: EnvFilter| handle.reload(filter).is_ok()),
+            filter_from_env: true,
+            applied: AppliedConfig::from(settings),
+        }
+    }
+
+    #[test]
+    fn apply_reload_releases_then_swaps_and_preserves_state() {
+        let path = reload_temp_path("swap");
+        if !try_write(&path, RELOAD_V1) {
+            return;
+        }
+        let Ok(settings) = simple_clicker::config::load(&path) else {
+            return;
+        };
+        let mut state = reload_state(&path, &settings);
+        let mut engine = settings.engine;
+        engine.set_running(true, 0);
+        let stop = Arc::new(AtomicBool::new(false));
+        let sink = fake_sink(Plan::Ok, &stop, usize::MAX);
+        let sent = Rc::clone(&sink.sent);
+        assert!(!state.watcher.changed(0), "the baseline check must not report");
+        assert!(try_write(&path, RELOAD_V2));
+
+        let mut sink = Box::new(sink);
+        let mut hotkeys = FakeHotkeys { presses: VecDeque::new() };
+        apply_reload(&mut state, &mut hotkeys, &mut engine, sink.as_mut(), 1_000);
+
+        assert!(engine.is_running(), "the toggle state must survive the swap");
+        let mut jitter = FixedJitter(0);
+        let actuations = engine.poll(1_000, None, &mut jitter);
+        assert!(
+            actuations.contains(&Actuation::KeyDown(Key::E)),
+            "the new action must actuate: {actuations:?}"
+        );
+        assert!(
+            sent.borrow().contains(&Actuation::ReleaseAll),
+            "held inputs must be released before the swap: {:?}",
+            sent.borrow()
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn apply_reload_keeps_the_old_config_on_a_broken_file() {
+        let path = reload_temp_path("broken");
+        if !try_write(&path, RELOAD_V1) {
+            return;
+        }
+        let Ok(settings) = simple_clicker::config::load(&path) else {
+            return;
+        };
+        let mut state = reload_state(&path, &settings);
+        let mut engine = settings.engine;
+        engine.set_running(true, 0);
+        let stop = Arc::new(AtomicBool::new(false));
+        let sink = fake_sink(Plan::Ok, &stop, usize::MAX);
+        let sent = Rc::clone(&sink.sent);
+        assert!(!state.watcher.changed(0));
+        assert!(try_write(&path, RELOAD_BROKEN));
+
+        let mut sink = Box::new(sink);
+        let mut hotkeys = FakeHotkeys { presses: VecDeque::new() };
+        apply_reload(&mut state, &mut hotkeys, &mut engine, sink.as_mut(), 1_000);
+
+        assert!(engine.is_running(), "a rejected reload must leave the engine alone");
+        let mut jitter = FixedJitter(0);
+        let actuations = engine.poll(2_000, None, &mut jitter);
+        assert!(
+            actuations.contains(&Actuation::KeyDown(Key::Q)),
+            "the old action must keep actuating: {actuations:?}"
+        );
+        assert!(sent.borrow().is_empty(), "nothing must reach the sink: {:?}", sent.borrow());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn apply_reload_rejects_keys_the_sink_cannot_honor() {
+        let path = reload_temp_path("picky");
+        if !try_write(&path, RELOAD_V1) {
+            return;
+        }
+        let Ok(settings) = simple_clicker::config::load(&path) else {
+            return;
+        };
+        let mut state = reload_state(&path, &settings);
+        let mut engine = settings.engine;
+        engine.set_running(true, 0);
+        assert!(!state.watcher.changed(0));
+        assert!(try_write(&path, RELOAD_V2));
+
+        let sent = Rc::new(RefCell::new(Vec::new()));
+        let mut sink = PickySink { sent: Rc::clone(&sent) };
+        let mut hotkeys = FakeHotkeys { presses: VecDeque::new() };
+        apply_reload(&mut state, &mut hotkeys, &mut engine, &mut sink, 1_000);
+
+        let mut jitter = FixedJitter(0);
+        let actuations = engine.poll(2_000, None, &mut jitter);
+        assert!(
+            actuations.contains(&Actuation::KeyDown(Key::Q)),
+            "the unsupported config must not half-apply: {actuations:?}"
+        );
+        assert!(
+            sent.borrow().is_empty(),
+            "a rejected reload must touch nothing: {:?}",
+            sent.borrow()
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn apply_reload_applies_engine_changes_despite_restart_tier_moves() {
+        let path = reload_temp_path("tier2");
+        if !try_write(&path, RELOAD_V1) {
+            return;
+        }
+        let Ok(settings) = simple_clicker::config::load(&path) else {
+            return;
+        };
+        let mut state = reload_state(&path, &settings);
+        let mut engine = settings.engine;
+        engine.set_running(true, 0);
+        let stop = Arc::new(AtomicBool::new(false));
+        let sink = fake_sink(Plan::Ok, &stop, usize::MAX);
+        assert!(!state.watcher.changed(0));
+        assert!(try_write(&path, RELOAD_V4));
+
+        let mut sink = Box::new(sink);
+        let mut hotkeys = FakeHotkeys { presses: VecDeque::new() };
+        apply_reload(&mut state, &mut hotkeys, &mut engine, sink.as_mut(), 1_000);
+
+        let mut jitter = FixedJitter(0);
+        let actuations = engine.poll(1_000, None, &mut jitter);
+        assert!(
+            actuations.contains(&Actuation::KeyDown(Key::E)),
+            "tier-1 content must apply despite the target change: {actuations:?}"
+        );
+        assert_eq!(
+            state.applied.target.process_names,
+            vec!["Wow".to_owned()],
+            "the snapshot must track the new file for future diffs"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn drive_reloads_a_changed_config_midrun() {
+        let path = reload_temp_path("midrun");
+        if !try_write(&path, RELOAD_V1) {
+            return;
+        }
+        let Ok(settings) = simple_clicker::config::load(&path) else {
+            return;
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let sink = ReloadSink {
+            sent: Rc::new(RefCell::new(Vec::new())),
+            stop: Arc::clone(&stop),
+            stop_key: Key::E,
+            stop_after: 2,
+        };
+        let sent = Rc::clone(&sink.sent);
+        let mut state = reload_state(&path, &settings);
+        let stack = DriveStack {
+            hotkeys: Box::new(HotkeysThatRewrite {
+                presses: VecDeque::from(vec![vec![Key::Numpad4]]),
+                rewrite: Some((path.clone(), RELOAD_V2.to_owned())),
+            }),
+            focus: None,
+            sink: Box::new(sink),
+            engine: settings.engine,
+            clock: Box::new(AdvancingClock(Cell::new(0))),
+            jitter: Box::new(FixedJitter(0)),
+        };
+        let result = drive(stack, &stop, false, true, Some(&mut state));
+        assert!(
+            matches!(&result, Ok(StopReason::Interrupted)),
+            "the reloaded run must stop cleanly: {result:?}"
+        );
+        let sent = sent.borrow();
+        assert!(sent.contains(&Actuation::KeyDown(Key::Q)), "v1 keys must flow first: {sent:?}");
+        let release = sent.iter().position(|act| *act == Actuation::ReleaseAll);
+        let e = sent.iter().position(|act| matches!(act, Actuation::KeyDown(Key::E)));
+        let release = release.unwrap_or_default();
+        let e = e.unwrap_or_default();
+        assert!(release < e, "the swap release must precede the new key: {sent:?}");
+        let _ = std::fs::remove_file(&path);
     }
 }

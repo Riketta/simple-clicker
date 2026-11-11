@@ -25,4 +25,8 @@ pub trait HotkeySource {
     /// A human-readable description of the backend for the startup banner.
     #[must_use]
     fn describe(&self) -> String;
+
+    /// Replaces the watch set after a config reload changed the hotkey
+    /// bindings. Adapters without a retargetable watch set may ignore it.
+    fn set_watched(&mut self, _watched_keys: &[Key]) {}
 }

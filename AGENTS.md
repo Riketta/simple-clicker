@@ -47,6 +47,11 @@ adapters -> ports -> domain -> (nothing)
   return `None` and the engine withholds presses but always releases.
   Ctrl+C is a polled stop flag: the driver releases held inputs and exits
   with code 130.
+- Config hot reload: the driver hash-checks the file every second; a
+  changed file re-applies engine content live (released-first engine
+  swap preserving the toggle state and selection), adapter-wiring
+  changes warn and wait for restart, and a file that fails validation or
+  names unsupported keys keeps the old configuration.
 
 ## Layout
 
@@ -59,6 +64,7 @@ adapters -> ports -> domain -> (nothing)
 | `src/adapters/driving/` | hotkey adapters (win32 polling, rdev listener) |
 | `src/adapters/driven/` | sinks (win32 messages, versa-kbm HID, dry-run logger), clock/jitter |
 | `src/config.rs` | TOML schema, loader, validation into domain values |
+| `src/reload.rs` | config hot-reload watcher (content-hash polling) |
 | `config.example.toml` | checked-in documented template; kept in sync by a test |
 
 ## Conventions

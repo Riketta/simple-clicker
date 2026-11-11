@@ -2,6 +2,11 @@
 # the checked-in, documented template and must stay in sync with the
 # config structs in the same change that alters the schema.
 # Secrets never live here - the clicker has none.
+#
+# While the clicker runs, changes to the config apply live (hash-checked
+# about once a second): engine content takes effect immediately; adapter
+# wiring ([target], [sink], [hotkeys], clicker.global_hotkeys) warns and
+# needs a restart.
 
 # ---------------------------------------------------------------------------
 # Target: which application the clicker drives.

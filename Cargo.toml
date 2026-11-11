@@ -30,7 +30,7 @@ serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 toml = "0.9"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 
 # Optional multi-platform adapters; a plain `cargo build` (no default
 # features) must always succeed on every target.
